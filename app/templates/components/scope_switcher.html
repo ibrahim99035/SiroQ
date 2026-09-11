@@ -1,0 +1,15 @@
+<div class="btn-group btn-group-sm">
+    <button type="button" class="btn btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+        My scope
+    </button>
+    <ul class="dropdown-menu">
+        {% if user.pharmacy_id %}
+            <li><a class="dropdown-item" href="#">My Pharmacy</a></li>
+        {% else %}
+            <li><a class="dropdown-item" href="#">Whole Association</a></li>
+        {% endif %}
+        {% if user.role == "association_admin" or user.role == "analyst" %}
+            <li><a class="dropdown-item" href="#">Association-wide</a></li>
+        {% endif %}
+    </ul>
+</div>

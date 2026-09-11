@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: siroq_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: siroq
+      POSTGRES_PASSWORD: siroq_dev_password
+      POSTGRES_DB: siroq
+    ports:
+      - "5432:5432"
+    volumes:
+      - siroq_pg_data:/var/lib/postgresql/data
+      - ./docker/init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U siroq -d siroq"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: siroq_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://siroq_app:siroq_app_dev_password@db:5432/siroq
+      MIGRATIONS_DATABASE_URL: postgresql+psycopg://siroq:siroq_dev_password@db:5432/siroq
+      SECRET_KEY: dev_secret_key_change_in_production
+      BRONZE_STORAGE_PATH: /data/bronze
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/code/app
+      - ./data/bronze:/data/bronze
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  siroq_pg_data:

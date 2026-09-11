@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Upload File{% endblock %}
+{% block content %}
+<h2>Upload File</h2>
+<p>Upload a CSV or XLSX file to begin processing.</p>
+
+<form method="POST" enctype="multipart/form-data" action="/applications/{{ application_id }}/upload">
+    <div class="mb-3">
+        <label class="form-label">File</label>
+        <input type="file" name="file" accept=".csv,.xlsx,.xls" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Upload</button>
+</form>
+
+<p class="mt-2 small text-muted">
+    Supported formats: CSV, Excel (.xlsx, .xls). Bulk/zip uploads are deferred to Phase 2+.
+</p>
+{% endblock %}

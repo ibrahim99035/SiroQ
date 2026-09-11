@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Data Explorer{% endblock %}
+{% block content %}
+<h2>Data Explorer</h2>
+
+<select id="entity-selector" class="form-select mb-3">
+    <option value="sales">Sales</option>
+    <option value="inventory_events">Inventory Events</option>
+    <option value="products">Products</option>
+</select>
+
+<div id="grid-container">
+    <!-- Grid will be loaded by HTMX -->
+</div>
+
+<script>
+    // Load initial grid
+    htmx.onLoad(function() {
+        htmx.trigger('getGridRows', 'sales');
+    });
+
+    // Handle entity selection
+    document.getElementById('entity-selector').addEventListener('change', function() {
+        const entity = this.value;
+        htmx.trigger('getGridRows', entity);
+    });
+</script>
+{% endblock %}

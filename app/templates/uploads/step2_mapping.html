@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Mapping Confirmation{% endblock %}
+{% block content %}
+<h2>Confirm Mapping</h2>
+<p>Review and confirm the automatic column mapping. Adjust any assignments before committing.</p>
+
+<table class="table table-striped">
+    <thead>
+        <tr>
+            <th>Source Header</th>
+            <th>Sample Values</th>
+            <th>Canonical Field</th>
+            <th>Confidence</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for field, info in classification.field_scores.items() %}
+        <tr>
+            <td>{{ field }}</td>
+            <td>{{ info.sample_values|join:", " }}</td>
+            <td>
+                <select class="form-select form-select-sm">
+                    <option value="">-- select --</option>
+                    {% for canonical in canonical_fields %}
+                        <option {% if info.suggested_mapping == canonical %}selected{% endif %} value="{{ canonical }}">{{ canonical }}</option>
+                    {% endfor %}
+                </select>
+            </td>
+            <td>
+                <span class="badge {% if info.score >= 90 %}bg-success{% elif info.score >= 70 %}bg-warning{% else %}bg-danger{% endif %}">
+                    {{ info.score }}%
+                </span>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<h3>Unmapped headers</h3>
+<p>{{ unmapped|join(", ") }}</p>
+
+<form method="POST" action="/datasets/{{ dataset_id }}/confirm">
+    <input type="hidden" name="field_map" value="{{ field_map|tojson }}">
+    <button type="submit" class="btn btn-primary">Commit Mapping</button>
+    <a href="/applications/{{ application_id }}" class="btn btn-link">Cancel</a>
+</form>
+{% endblock %}
