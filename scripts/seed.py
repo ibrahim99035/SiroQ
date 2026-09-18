@@ -1,89 +1,96 @@
-from datetime import datetime
+from uuid import uuid4
 
-from app.database import Base, engine, SessionLocal
+from sqlalchemy import text, select
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.database import SessionLocal
 from app.models.models import Associations, Pharmacies, Users
 from app.security import hash_password
-from sqlalchemy import select
+
+# Stable demo tenant id so RLS context and idempotent lookups agree.
+DEMO_ASSOC_ID = "11111111-1111-4111-8111-111111111111"
 
 
 def idempotent_create():
-    """Create seed data if it doesn't already exist."""
-    db = SessionLocal()
+    """Create seed data idempotently, respecting row-level security.
 
+    The script connects as the least-privilege ``siroq_app`` role, so it must
+    set the RLS tenant variable to the demo association before doing any work,
+    otherwise FORCE RLS would hide every row and block every insert.
+    """
+    db = SessionLocal()
     try:
-        # 1. Create Association "Demo Pharmacy Group"
-        assoc_name = "Demo Pharmacy Group"
-        assoc_stmt = select(Associations).filter(
-            Associations.name == assoc_name
+        db.execute(
+            text("SELECT set_config('app.current_association_id', :aid, true)"),
+            {"aid": DEMO_ASSOC_ID},
         )
-        assoc = db.execute(assoc_stmt).scalar_one_or_none()
+
+        # 1. Association "Demo Pharmacy Group"
+        assoc = db.execute(
+            select(Associations).where(Associations.id == DEMO_ASSOC_ID)
+        ).scalar_one_or_none()
         if not assoc:
-            assoc = Associations(name=assoc_name)
+            assoc = Associations(id=DEMO_ASSOC_ID, name="Demo Pharmacy Group")
             db.add(assoc)
             db.flush()
             print(f"Created association: {assoc.id}")
 
-        # 2. Create Pharmacy "Demo Branch 1" under the association
-        pharm_name = "Demo Branch 1"
-        pharm_stmt = select(Pharmacies).filter(
-            Pharmacies.name == pharm_name,
-            Pharmacies.association_id == assoc.id,
-        )
-        pharmacy = db.execute(pharm_stmt).scalar_one_or_none()
-        if not pharmacy:
-            pharmacy = Pharmacies(
-                name=pharm_name,
-                association_id=assoc.id,
+        # 2. Pharmacy "Demo Branch 1"
+        pharm = db.execute(
+            select(Pharmacies).where(
+                Pharmacies.association_id == DEMO_ASSOC_ID,
+                Pharmacies.name == "Demo Branch 1",
+            )
+        ).scalar_one_or_none()
+        if not pharm:
+            pharm = Pharmacies(
+                name="Demo Branch 1",
+                association_id=DEMO_ASSOC_ID,
                 lat=40.7128,
                 lng=-74.0060,
                 region="NY",
                 timezone="America/New_York",
             )
-            db.add(pharmacy)
+            db.add(pharm)
             db.flush()
-            print(f"Created pharmacy: {pharmacy.id}")
+            print(f"Created pharmacy: {pharm.id}")
 
-        # 3. Create association_admin user
-        admin_email = "admin@siroq.local"
-        admin_stmt = select(Users).filter(Users.email == admin_email)
-        admin = db.execute(admin_stmt).scalar_one_or_none()
-        if not admin:
-            admin = Users(
-                email=admin_email,
+        seed_users = [
+            ("admin@siroq.local", "Demo Admin", "association_admin", None),
+            ("manager@siroq.local", "Demo Manager", "pharmacy_manager", pharm.id),
+            ("steward@siroq.local", "Demo Steward", "data_steward", pharm.id),
+            ("analyst@siroq.local", "Demo Analyst", "analyst", None),
+            ("viewer@siroq.local", "Demo Viewer", "viewer", None),
+        ]
+        for email, full_name, role, pharmacy_id in seed_users:
+            existing = db.execute(
+                select(Users).where(Users.email == email)
+            ).scalar_one_or_none()
+            if existing:
+                # Update password hash to current scheme
+                existing.hashed_password = hash_password("ChangeMe123!")
+                db.flush()
+                print(f"Updated password for {role}: {email}")
+                continue
+            user = Users(
+                email=email,
                 hashed_password=hash_password("ChangeMe123!"),
-                full_name="Demo Admin",
-                role="association_admin",
-                association_id=assoc.id,
-                pharmacy_id=None,
+                full_name=full_name,
+                role=role,
+                association_id=DEMO_ASSOC_ID,
+                pharmacy_id=pharmacy_id,
             )
-            db.add(admin)
+            db.add(user)
             db.flush()
-            print(f"Created association_admin: {admin.id}")
-
-        # 4. Create pharmacy_manager user scoped to Demo Branch 1
-        manager_email = "manager@siroq.local"
-        manager_stmt = select(Users).filter(
-            Users.email == manager_email,
-            Users.pharmacy_id == pharmacy.id,
-        )
-        manager = db.execute(manager_stmt).scalar_one_or_none()
-        if not manager:
-            manager = Users(
-                email=manager_email,
-                hashed_password=hash_password("ChangeMe123!"),
-                full_name="Demo Manager",
-                role="pharmacy_manager",
-                association_id=assoc.id,
-                pharmacy_id=pharmacy.id,
-            )
-            db.add(manager)
-            db.flush()
-            print(f"Created pharmacy_manager: {manager.id}")
+            print(f"Created {role}: {email}")
 
         db.commit()
         print("Seed data committed successfully.")
-
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         db.rollback()
         print(f"Error seeding data: {e}")
         raise
@@ -92,6 +99,5 @@ def idempotent_create():
 
 
 if __name__ == "__main__":
-    # Ensure tables exist
-    Base.metadata.create_all(bind=engine)
+    # Tables are created/managed by Alembic (`make migrate`), never here.
     idempotent_create()

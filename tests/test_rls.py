@@ -1,55 +1,110 @@
-"""Row Level Security test for SiroQ.
+"""Live Row-Level-Security verification.
 
-Tests that RLS policies properly isolate data by association_id.
-This test verifies the session-based RLS mechanism works correctly.
+Connects as the least-privilege ``siroq_app`` role (never ``siroq``) so a
+table-owner bypass cannot fake a pass. Inserts two pharmacy rows under two
+different fake association ids, then asserts that switching the tenant
+variable shows ONLY the matching row. Also verifies the RLS flags, policy
+existence and that ``siroq`` (not ``siroq_app``) owns every table.
 """
 import pytest
+from sqlalchemy import create_engine, text
+
+from app.config import settings
+
+A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+TENANT_TABLES = [
+    "associations", "pharmacies", "users", "applications", "mapping_profiles",
+    "datasets", "products", "batches", "inventory_events", "sales",
+    "sale_lines", "prescribers", "edit_audit_log",
+]
 
 
-@pytest.mark.skipif(True, reason="Requires running Docker containers with PostgreSQL")
-def test_rls_session_variable():
-    """Test that the SET LOCAL command works for RLS."""
-    from sqlalchemy import text, create_engine
-    from sqlalchemy.orm import Session
-
-    # Use the application database URL
-    engine = create_engine(
-        "postgresql+psycopg://siroq_app:siroq_app_dev_password@localhost:5432/siroq"
-    )
-
-    with Session(engine) as db:
-        # Execute the SET LOCAL command
-        db.execute(text("SET LOCAL app.current_association_id = :aid"), {"aid": "1"})
-        db.commit()
-
-        # Verify it's set
-        result = db.execute(text("SHOW app.current_association_id")).scalar()
-        assert result == "1"
+def _app_engine():
+    return create_engine(settings.DATABASE_URL, future=True)  # siroq_app
 
 
-@pytest.mark.skipif(True, reason="Requires running Docker containers with PostgreSQL")
-def test_rls_query_isolation():
-    """Test that RLS policies isolate data by association_id."""
-    from sqlalchemy import text, create_engine
-    from sqlalchemy.orm import Session
+def _owner_engine():
+    return create_engine(settings.MIGRATIONS_DATABASE_URL, future=True)  # siroq
 
-    engine = create_engine(
-        "postgresql+psycopg://siroq_app:siroq_app_dev_password@localhost:5432/siroq"
-    )
 
-    with Session(engine) as db:
-        # Set association 1
-        db.execute(text("SET LOCAL app.current_association_id = :aid"), {"aid": "1"})
-        db.commit()
+def _set_context(conn, assoc_id):
+    conn.execute(text("SELECT set_config('app.current_association_id', :a, true)"),
+                 {"a": str(assoc_id)})
 
-        # Query with no WHERE clause - RLS should filter by association_id
-        result = db.execute(text("SELECT count(*) FROM pharmacies")).scalar()
-        assert result > 0  # Should return rows, filtered by RLS
 
-        # Set association 2
-        db.execute(text("SET LOCAL app.current_association_id = :aid"), {"aid": "2"})
-        db.commit()
+def _insert_pharmacy(engine, assoc_id, name):
+    with engine.begin() as conn:
+        _set_context(conn, assoc_id)
+        conn.execute(
+            text("INSERT INTO pharmacies(association_id, name) VALUES (:a, :n)"),
+            {"a": assoc_id, "n": name},
+        )
 
-        # Query again - should still return rows (just different ones due to RLS)
-        result2 = db.execute(text("SELECT count(*) FROM pharmacies")).scalar()
-        assert result2 > 0
+
+def _visible_pharmacy_names(engine, assoc_id, names):
+    with engine.begin() as conn:
+        _set_context(conn, assoc_id)
+        rows = conn.execute(text("SELECT name FROM pharmacies")).fetchall()
+    return [r[0] for r in rows if r[0] in names]
+
+
+def test_rls_flags_and_flavor():
+    eng = _owner_engine()
+    with eng.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT tablename, rowsecurity, tableowner "
+            "FROM pg_tables WHERE schemaname='public'"
+        )).fetchall()
+    by = {r[0]: r for r in rows}
+    for t in TENANT_TABLES:
+        assert t in by, f"{t} missing from pg_tables"
+        assert by[t][1], f"{t} rowsecurity is off"
+    # siroq (not the app role) must own every table
+    assert all(r[2] == "siroq" for r in rows), f"non-siroq owner: {[(r[0], r[2]) for r in rows]}"
+
+
+def test_tenant_isolation_policy_exists():
+    eng = _owner_engine()
+    with eng.connect() as conn:
+        n = conn.execute(text(
+            "SELECT count(*) FROM pg_policies "
+            "WHERE tablename='pharmacies' AND policyname='tenant_isolation'"
+        )).scalar()
+    assert n == 1, "tenant_isolation policy missing on pharmacies"
+
+
+def test_cross_tenant_isolation():
+    eng = _app_engine()
+    owner_eng = _owner_engine()
+    
+    # Create test associations using owner role (bypasses RLS)
+    with owner_eng.begin() as conn:
+        conn.execute(text("INSERT INTO associations (id, name) VALUES (CAST(:a AS uuid), 'RLS-Alpha'), (CAST(:b AS uuid), 'RLS-Beta') ON CONFLICT DO NOTHING"),
+                     {"a": A, "b": B})
+    
+    # clean any leftovers from a previous run
+    for assoc, name in ((A, "RLS-Alpha"), (B, "RLS-Beta")):
+        with eng.begin() as conn:
+            _set_context(conn, assoc)
+            conn.execute(text("DELETE FROM pharmacies WHERE name=:n"), {"n": name})
+
+    _insert_pharmacy(eng, A, "RLS-Alpha")
+    _insert_pharmacy(eng, B, "RLS-Beta")
+
+    visible_a = _visible_pharmacy_names(eng, A, ["RLS-Alpha", "RLS-Beta"])
+    assert visible_a == ["RLS-Alpha"], f"tenant A saw: {visible_a}"
+
+    visible_b = _visible_pharmacy_names(eng, B, ["RLS-Alpha", "RLS-Beta"])
+    assert visible_b == ["RLS-Beta"], f"tenant B saw: {visible_b}"
+
+    # cleanup
+    for assoc, name in ((A, "RLS-Alpha"), (B, "RLS-Beta")):
+        with eng.begin() as conn:
+            _set_context(conn, assoc)
+            conn.execute(text("DELETE FROM pharmacies WHERE name=:n"), {"n": name})
+    
+    # cleanup associations
+    with owner_eng.begin() as conn:
+        conn.execute(text("DELETE FROM associations WHERE id IN (CAST(:a AS uuid), CAST(:b AS uuid))"), {"a": A, "b": B})

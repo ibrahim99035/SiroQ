@@ -174,3 +174,12 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+### SiroQ project additions ###
+# Generated test fixtures (regenerate with tests/comprehensive_test_data.py)
+tests/generated_test_data/
+# Local bronze-layer raw storage (bind-mounted into the app container)
+data/
+# Generated OpenAPI dump (regenerate from app.openapi())
+swagger.json
+

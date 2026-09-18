@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgis/postgis:16-3.4
+    image: postgis/postgis:15-3.4
     container_name: siroq_db
     restart: unless-stopped
     environment:
@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: siroq_dev_password
       POSTGRES_DB: siroq
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - siroq_pg_data:/var/lib/postgresql/data
       - ./docker/init-db:/docker-entrypoint-initdb.d
@@ -38,6 +38,7 @@ services:
     volumes:
       - ./app:/code/app
       - ./data/bronze:/data/bronze
+      - ./tests:/code/tests
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:

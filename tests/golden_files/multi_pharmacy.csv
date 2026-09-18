@@ -1,0 +1,4 @@
+pharmacy,product_name,sale_timestamp,quantity,unit_price,total_amount
+Branch A,Paracetamol,2026-09-01,3,1.50,4.50
+Branch B,Ibuprofen,2026-09-02,1,2.00,2.00
+Branch A,Amoxicillin,2026-09-02,5,1.00,5.00
