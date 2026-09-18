@@ -33,10 +33,10 @@ class Associations(Base):
     name: Mapped[str] = mapped_column(nullable=False)
     country: Mapped[str | None] = mapped_column(nullable=True)
     default_currency: Mapped[str] = mapped_column(
-        Text(3), nullable=False, default="USD"
+        Text(3), nullable=False, default="EGP"
     )
     default_timezone: Mapped[str] = mapped_column(
-        Text(32), nullable=False, default="UTC"
+        Text(32), nullable=False, default="Africa/Cairo"
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

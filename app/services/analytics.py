@@ -1,11 +1,12 @@
 """Analytics aggregation helpers for the dashboards. Scope-aware via RLS; the
 queries only ever see rows in the caller's tenant (and pharmacy scope).
 """
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from sqlalchemy import func, case, and_, or_, text, desc, distinct, extract
 from sqlalchemy.orm import aliased
 
 from app.models.models import (
+    Associations,
     Sales,
     SaleLines,
     InventoryEvents,
@@ -25,6 +26,12 @@ from app.models.models import (
 )
 
 
+def _currency(db, association_id) -> str:
+    """Default currency for the association (Egypt-first fallback)."""
+    assoc = db.query(Associations).filter(Associations.id == association_id).first()
+    return assoc.default_currency if assoc and assoc.default_currency else "EGP"
+
+
 def sales_kpis(db, association_id, pharmacy_id=None):
     q = db.query(
         func.count(Sales.id),
@@ -35,13 +42,15 @@ def sales_kpis(db, association_id, pharmacy_id=None):
     tx_count, revenue = q.one()
     avg = float(revenue) / tx_count if tx_count else 0.0
 
+    rows_q = db.query(
+        func.date(Sales.sale_timestamp).label("day"),
+        func.coalesce(func.sum(Sales.total_amount), 0).label("rev"),
+    ).filter(Sales.association_id == association_id)
+    if pharmacy_id:
+        # the series must honour the same scope as the tiles above
+        rows_q = rows_q.filter(Sales.pharmacy_id == pharmacy_id)
     rows = (
-        db.query(
-            func.date(Sales.sale_timestamp).label("day"),
-            func.coalesce(func.sum(Sales.total_amount), 0).label("rev"),
-        )
-        .filter(Sales.association_id == association_id)
-        .group_by(func.date(Sales.sale_timestamp))
+        rows_q.group_by(func.date(Sales.sale_timestamp))
         .order_by(func.date(Sales.sale_timestamp))
         .all()
     )
@@ -51,43 +60,77 @@ def sales_kpis(db, association_id, pharmacy_id=None):
         "total_revenue": float(revenue),
         "transactions": tx_count,
         "avg_basket": avg,
+        "currency": _currency(db, association_id),
         "labels": labels or ["All"],
         "revenues": revenues or [0.0],
     }
 
 
 def inventory_kpis(db, association_id, pharmacy_id=None):
-    events = (
-        db.query(InventoryEvents)
-        .filter(InventoryEvents.association_id == association_id)
-        .all()
-    )
-    waste = sum(float(e.quantity) for e in events if e.event_type in ("expiry_writeoff", "damage"))
-    units_near_expiry = db.query(func.count(Batches.id)).join(
-        InventoryEvents, InventoryEvents.batch_id == Batches.id
-    ).filter(
-        Batches.association_id == association_id,
-        Batches.expiry_date.isnot(None),
-    ).scalar() or 0
+    """Inventory / expiry KPIs for the caller's scope.
 
-    sales_units = (
-        db.query(func.coalesce(func.sum(SaleLines.quantity), 0))
+    Units are summed on-hand quantities, waste is valued at each event's unit
+    cost, and turnover is revenue over current stock value.
+    """
+    today = date.today()
+    horizon = today + timedelta(days=30)
+
+    batch_q = db.query(Batches).filter(Batches.association_id == association_id)
+    if pharmacy_id:
+        batch_q = batch_q.join(
+            InventoryEvents, InventoryEvents.batch_id == Batches.id
+        ).filter(InventoryEvents.pharmacy_id == pharmacy_id)
+    batches = batch_q.all()
+
+    def _as_date(value):
+        return value.date() if hasattr(value, "date") else value
+
+    units_near_expiry = sum(
+        float(b.quantity_on_hand or 0)
+        for b in batches
+        if b.expiry_date and _as_date(b.expiry_date) <= horizon
+    )
+
+    event_q = db.query(InventoryEvents).filter(
+        InventoryEvents.association_id == association_id,
+        InventoryEvents.event_type.in_(("expiry_writeoff", "damage")),
+    )
+    if pharmacy_id:
+        event_q = event_q.filter(InventoryEvents.pharmacy_id == pharmacy_id)
+    events = event_q.all()
+
+    waste_cost = sum(float(e.quantity or 0) * float(e.unit_cost or 0) for e in events)
+
+    sales_q = (
+        db.query(func.coalesce(func.sum(SaleLines.quantity * SaleLines.unit_price), 0))
         .join(Sales, Sales.id == SaleLines.sale_id)
         .filter(Sales.association_id == association_id)
-        .scalar()
-    ) or 0
+    )
+    if pharmacy_id:
+        sales_q = sales_q.filter(Sales.pharmacy_id == pharmacy_id)
+    revenue = float(sales_q.scalar() or 0)
+
+    stock_value = sum(
+        float(b.quantity_on_hand or 0) * float(b.cost_basis or 0) for b in batches
+    )
+    turnover = revenue / stock_value if stock_value > 0 else 0.0
 
     product_labels = []
     waste_data = []
     for e in events:
-        if e.event_type in ("expiry_writeoff", "damage"):
-            product_labels.append(str(e.batch_id)[:8])
-            waste_data.append(float(e.quantity))
+        batch = db.query(Batches).filter(Batches.id == e.batch_id).first()
+        name = None
+        if batch:
+            product = db.query(Products).filter(Products.id == batch.product_id).first()
+            name = (product.canonical_name or product.raw_name) if product else None
+        product_labels.append(name or str(e.batch_id)[:8])
+        waste_data.append(float(e.quantity or 0))
 
     return {
         "units_near_expiry": units_near_expiry,
-        "waste_cost": waste,
-        "turnover": float(sales_units) / max(waste, 1.0),
+        "waste_cost": waste_cost,
+        "turnover": turnover,
+        "currency": _currency(db, association_id),
         "product_labels": product_labels or ["None"],
         "waste_data": waste_data or [0.0],
     }

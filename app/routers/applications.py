@@ -326,6 +326,8 @@ def dataset_confirm(dataset_id: str, request: Request,
         return HTMLResponse("<h1>Not found</h1>", status_code=404)
     app = db.get(Applications, dataset.application_id)
     app_id = app.id
+    assoc = db.get(Associations, app.association_id)
+    currency = assoc.default_currency if assoc and assoc.default_currency else "EGP"
 
 # ---- HARD GATE: a multi-pharmacy dataset must name its pharmacy column
     if app.pharmacy_id is None and not (pharmacy_identifier_column or app.pharmacy_identifier_column):
@@ -345,7 +347,7 @@ def dataset_confirm(dataset_id: str, request: Request,
     if app.pharmacy_id is not None:
         committed, errors, _ = ingestion.commit_dataset(
             db, app.association_id, app.id, dataset.id, df, field_map,
-            app.pharmacy_id, user.id)
+            app.pharmacy_id, user.id, currency=currency)
     else:
         col = pharmacy_identifier_column or app.pharmacy_identifier_column
         if col:
@@ -354,7 +356,7 @@ def dataset_confirm(dataset_id: str, request: Request,
                 ph_id = mapping_service.resolve_pharmacy(db, app.association_id, row.get(col))
                 c, e, _ = ingestion.commit_dataset(
                     db, app.association_id, app.id, dataset.id, df.iloc[[i]], field_map,
-                    ph_id, user.id)
+                    ph_id, user.id, currency=currency)
                 committed += c
                 for err in e:
                     errors.append(err)

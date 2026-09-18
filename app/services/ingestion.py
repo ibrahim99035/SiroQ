@@ -125,10 +125,11 @@ def validate_rows(df, mapping,
 
 
 def commit_dataset(db, association_id, application_id, dataset_id, df,
-                   mapping, pharmacy_id, uploaded_by_id):
+                   mapping, pharmacy_id, uploaded_by_id, currency="USD"):
     """Insert rows from the mapped file into the Silver schema.
 
-    Returns (committed, errors, products_created).
+    ``currency`` is the association's default (EGP for the Egypt market) and is
+    stamped on every committed sale. Returns (committed, errors, products_created).
     """
     from app.models.models import Sales, SaleLines, Products, Datasets
 
@@ -170,7 +171,7 @@ def commit_dataset(db, association_id, application_id, dataset_id, df,
             sale_timestamp=_row_ts(row_rec.get("sale_timestamp"), now),
             payment_method=_row_text(row_rec.get("payment_method")),
             total_amount=_number(row_rec.get("total_amount")) or 0,
-            currency="USD",
+            currency=currency or "USD",
             extra_attributes={},
         )
         db.add(sale)

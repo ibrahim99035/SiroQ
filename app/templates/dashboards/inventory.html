@@ -4,13 +4,13 @@
 <h2>Inventory Dashboard</h2>
 
 <div class="row">
-    {% with title="Units Near Expiry", value="0", label="Units" %}
+    {% with title="Units Near Expiry (30d)", value="%.0f"|format(units_near_expiry), label="Units" %}
         {% include "components/kpi_tile.html" %}
     {% endwith %}
-    {% with title="Waste Cost This Month", value="$", label="0.00" %}
+    {% with title="Waste Cost", value=currency ~ " " ~ "%.2f"|format(waste_cost), label="write-offs" %}
         {% include "components/kpi_tile.html" %}
     {% endwith %}
-    {% with title="Turnover Ratio", value="0.0", label="Ratio" %}
+    {% with title="Turnover Ratio", value="%.2f"|format(turnover), label="Revenue / stock value" %}
         {% include "components/kpi_tile.html" %}
     {% endwith %}
 </div>
