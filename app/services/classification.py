@@ -13,27 +13,46 @@ import openpyxl
 
 CANONICAL_FIELD_SYNONYMS = {
     "expiry_date": ["exp", "expiry", "use by", "use-by", "datum ur",
-                    "date d'utilisation", "日期", "تاريخ الانتهاء"],
-    "receipt_date": ["received", "receipt date", "date received", "入庫日"],
+                    "date d'utilisation", "日期", "تاريخ الانتهاء",
+                    "expiry_date", "expiry date", "exp date"],
+    "receipt_date": ["received", "receipt date", "date received", "入庫日",
+                     "receipt_date"],
     "sale_timestamp": ["sale date", "transaction date", "sold date",
                        "transaction timestamp", "transaction date",
-                       "تاريخ البيع", "التاريخ"],
-    "quantity": ["qty", "quantity", "amount", "count", "الكمية"],
+                       "تاريخ البيع", "التاريخ", "sale_timestamp", "sale_datetime"],
+    "quantity": ["qty", "quantity", "amount", "count", "الكمية", "qty_sold"],
     "unit_price": ["unit price", "price per unit", "unit cost",
-                   "سعر الوحدة", "السعر"],
+                   "سعر الوحدة", "السعر", "unit_price", "price"],
     "total_amount": ["total amount", "total sales", "grand total",
-                     "الإجمالي", "المبلغ"],
+                     "الإجمالي", "المبلغ", "total_amount", "total"],
     "payment_method": ["payment", "pay method", "mode of payment",
-                       "طريقة الدفع"],
+                       "طريقة الدفع", "payment_method", "payment type"],
     "prescriber": ["prescriber", "doctor", "physician", " prescribing",
-                   "الطبيب"],
-    "batch_id": ["batch", "lot", "lot number", "الدفعة", "رقم الدفعة"],
+                   "الطبيب", "prescriber_name"],
+    "batch_id": ["batch", "lot", "lot number", "الدفعة", "رقم الدفعة",
+                 "batch_id", "batch_no", "lot_no"],
     "product_name": ["product", "drug name", "medicine name", "drug",
-                     "اسم المنتج", "المنتج"],
+                     "اسم المنتج", "المنتج", "product_name", "item", "item_name"],
 }
 
 CONF_CONFIRMED = 90
 CONF_UNCERTAIN = 70
+
+# Acceptable detected-value kinds per canonical field. The content-inference
+# pass may only suggest a source column whose detected kind is in this set, so a
+# date column can never be offered as a numeric amount (or vice versa).
+FIELD_VALUE_KINDS = {
+    "expiry_date": {"date"},
+    "receipt_date": {"date"},
+    "sale_timestamp": {"date"},
+    "quantity": {"number"},
+    "unit_price": {"number"},
+    "total_amount": {"number"},
+    "payment_method": {"category", "text"},
+    "prescriber": {"category", "text"},
+    "batch_id": {"category", "text"},
+    "product_name": {"category", "text"},
+}
 
 
 def score_headers(headers, field):
@@ -45,25 +64,49 @@ def score_headers(headers, field):
     return best
 
 
-def score_content(values):
+def detect_content(values):
+    """Return ``(kinds, score)`` inferred from a column's values.
+
+    ``kinds`` is a subset of {"date", "number", "category", "text"} and is what
+    lets the classifier refuse a type-mismatched column; ``score`` keeps the
+    historical confidence ladder (categorical 85 < numeric 88 < date 90).
+    """
     if not values:
-        return 0.0
+        return set(), 0.0
     non_null = [v for v in values if v is not None and str(v).strip() != ""]
     if not non_null:
-        return 0.0
-    distinct = len({str(v).lower().strip() for v in non_null})
-    ratio = distinct / len(non_null)
-    if ratio < 0.1 and len(non_null) >= 3:
-        return 85.0
+        return set(), 0.0
+
     date_re = re.compile(r"\d{4}[-/]\d{2}[-/]\d{2}|\d{2}[-/]\d{2}[-/]\d{4}")
-    dates = sum(1 for v in non_null if date_re.search(str(v)))
-    if dates / len(non_null) > 0.6:
-        return 90.0
+    date_ratio = sum(1 for v in non_null if date_re.search(str(v))) / len(non_null)
     num_re = re.compile(r"^-?\d+(\.\d+)?$")
-    nums = sum(1 for v in non_null if num_re.match(str(v).strip()))
-    if nums / len(non_null) > 0.6:
-        return 88.0
-    return 50.0
+    num_ratio = sum(1 for v in non_null if num_re.match(str(v).strip())) / len(non_null)
+    cat_ratio = len({str(v).lower().strip() for v in non_null}) / len(non_null)
+
+    kinds = set()
+    if date_ratio > 0.6:
+        kinds.add("date")
+    if num_ratio > 0.6:
+        kinds.add("number")
+    if cat_ratio < 0.1 and len(non_null) >= 3:
+        kinds.add("category")
+    if not kinds:
+        kinds.add("text")
+
+    if cat_ratio < 0.1 and len(non_null) >= 3:
+        score = 85.0
+    elif date_ratio > 0.6:
+        score = 90.0
+    elif num_ratio > 0.6:
+        score = 88.0
+    else:
+        score = 50.0
+    return kinds, score
+
+
+def score_content(values):
+    """Backwards-compatible scalar-only view of :func:`detect_content`."""
+    return detect_content(values)[1]
 
 
 def classify_file(file_path: str) -> dict:
@@ -85,12 +128,20 @@ def classify_file(file_path: str) -> dict:
 
 
 def _classify_dataframe(df: "pd.DataFrame") -> dict:
-    """Classify a dataframe and return mapping suggestions."""
+    """Classify a dataframe and return mapping suggestions.
+
+    Header (name) matches are authoritative, but a single source column may back
+    only one canonical field. For any field left unresolved, content inference is
+    allowed to pick a column only when its detected kind matches the field — this
+    is what stops a weak header from grabbing an unrelated, higher-scoring column
+    (e.g. mapping ``total_amount`` onto a date column).
+    """
     headers = [str(h) for h in df.columns.tolist()]
     values = {h: df[h].tolist() for h in df.columns}
 
-    field_scores = {}
-    suggested = {}
+    # --- Phase A: header (name) matching --------------------------------
+    header_scores = {}
+    header_pick = {}
     for field, syns in CANONICAL_FIELD_SYNONYMS.items():
         best_score = 0.0
         best_header = None
@@ -100,40 +151,64 @@ def _classify_dataframe(df: "pd.DataFrame") -> dict:
                 if s > best_score:
                     best_score = s
                     best_header = h
-        field_scores[field] = round(best_score, 1)
-        suggested[field] = best_header
+        header_scores[field] = round(best_score, 1)
+        header_pick[field] = best_header if best_score >= CONF_UNCERTAIN else None
 
+    # Resolve collisions: keep the strongest field per source column and free
+    # the losers so the content pass can try to place them elsewhere.
+    winners = {}
+    for field, col in header_pick.items():
+        if col is None:
+            continue
+        if col not in winners or header_scores[field] > header_scores[winners[col]]:
+            winners[col] = field
+    claimed = {field: col for col, field in winners.items()}
+    for field, col in header_pick.items():
+        if col is not None and claimed.get(field) != col:
+            header_pick[field] = None
+
+    # --- Phase B: kind-aware content inference --------------------------
     content_scores = {}
+    suggested = {field: claimed.get(field) for field in CANONICAL_FIELD_SYNONYMS}
+    used_columns = {col for col in suggested.values() if col}
     for field in CANONICAL_FIELD_SYNONYMS:
-        if field_scores[field] < CONF_UNCERTAIN:
-            best_c = 0.0
-            best_h = None
-            for h in headers:
-                c = score_content(values.get(h, []))
-                if c > best_c:
-                    best_c = c
-                    best_h = h
-            content_scores[field] = round(best_c, 1)
-            if best_c > field_scores[field]:
-                suggested[field] = best_h
-        else:
-            content_scores[field] = field_scores[field]
+        if suggested[field] is not None:
+            content_scores[field] = header_scores[field]
+            continue
+        allowed = FIELD_VALUE_KINDS.get(field, set())
+        best_c = 0.0
+        best_h = None
+        for h in headers:
+            if h in used_columns:
+                continue
+            kinds, c = detect_content(values.get(h, []))
+            if not (kinds & allowed):
+                continue
+            if c > best_c:
+                best_c, best_h = c, h
+        content_scores[field] = round(best_c, 1)
+        if best_h is not None and best_c >= CONF_UNCERTAIN:
+            # only surface a content-based suggestion that clears the review
+            # threshold; a weak guess is reported as "unconfirmed" with no pick
+            suggested[field] = best_h
+            used_columns.add(best_h)
 
+    # --- Phase C: final per-field status --------------------------------
     final = {}
     for field in CANONICAL_FIELD_SYNONYMS:
-        score = max(field_scores[field], content_scores.get(field, 0))
+        score = max(header_scores[field], content_scores.get(field, 0))
         if score >= CONF_CONFIRMED:
             status = "confirmed"
         elif score >= CONF_UNCERTAIN:
             status = "uncertain"
         else:
             status = "unconfirmed"
+        col = suggested[field]
         final[field] = {
             "score": score,
             "status": status,
-            "sample_values": [str(v) for v in (values.get(suggested[field], [])[:3])]
-            if suggested[field] else [],
-            "suggested_mapping": suggested[field],
+            "sample_values": [str(v) for v in (values.get(col, [])[:3])] if col else [],
+            "suggested_mapping": col,
         }
 
     return {

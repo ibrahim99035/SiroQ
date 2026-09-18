@@ -1,9 +1,10 @@
 """Bronze persistence, row validation and the Silver commit step of ingestion.
 
-Validation is plain Python and covers the three Phase-1 checks:
+Validation is plain Python and covers the four Phase-1 checks:
   * negative quantity / unit price / total amount
   * exact duplicate row within the dataset (hash-based)
   * orphan product reference on a sale line (empty / unmatchable product)
+  * missing or unparseable date in a mapped date column (never defaulted to now)
 Valid rows still commit when siblings are rejected (partial success).
 
 Phase 2 additions:
@@ -63,12 +64,29 @@ def _number(value):
             return None
 
 
-def validate_rows(df, mapping, canonical_columns=("quantity", "unit_price", "total_amount")):
+def _is_date(value) -> bool:
+    """True when ``value`` parses as a real date (blank/NaT/garbage are False)."""
+    if value is None:
+        return False
+    if isinstance(value, float) and pd.isna(value):
+        return False
+    if str(value).strip() == "":
+        return False
+    try:
+        return not pd.isna(pd.to_datetime(value, errors="coerce"))
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_rows(df, mapping,
+                  canonical_columns=("quantity", "unit_price", "total_amount"),
+                  date_columns=("sale_timestamp", "expiry_date", "receipt_date")):
     """Return (valid_indices, errors) where each error is {row, reasons[]}."""
     seen = set()
     valid = []
     errors = []
     required_number = [c for c in canonical_columns if mapping.get(c)]
+    required_date = [c for c in date_columns if mapping.get(c)]
     for i, (idx, row) in enumerate(df.iterrows()):
         reasons = []
         # 1) negative numeric check
@@ -88,6 +106,17 @@ def validate_rows(df, mapping, canonical_columns=("quantity", "unit_price", "tot
                 reasons.append("orphan product reference (no product value)")
             elif pd.isna(pval):
                 reasons.append("orphan product reference (no product value)")
+        # 4) date integrity: a mapped date that is missing or unparseable is a
+        #    rejection reason, never a silent substitution with "now".
+        for field in required_date:
+            val = row.get(mapping[field])
+            if _is_date(val):
+                continue
+            if val is None or str(val).strip() == "" or (
+                    isinstance(val, float) and pd.isna(val)):
+                reasons.append(f"missing {field}")
+            else:
+                reasons.append(f"unparseable {field} date ({val})")
         if reasons:
             errors.append({"row": idx, "reasons": reasons})
         else:
