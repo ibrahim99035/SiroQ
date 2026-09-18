@@ -563,7 +563,9 @@ class Alerts(Base):
         ForeignKey("alert_rules.id"), nullable=False
     )
     entity_type: Mapped[str] = mapped_column(Text(30), nullable=False)
-    entity_id: Mapped[str] = mapped_column(nullable=False)
+    # No foreign key, so SQLAlchemy would infer VARCHAR while the schema column
+    # is uuid (same drift that broke edit_audit_log writes); keep them aligned.
+    entity_id: Mapped[str] = mapped_column(Uuid(), nullable=False)
     metric_value: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
     threshold_value: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
     severity: Mapped[str] = mapped_column(Text(20), nullable=False)
@@ -592,7 +594,10 @@ class EditAuditLog(Base):
         ForeignKey("associations.id"), nullable=False
     )
     entity_type: Mapped[str] = mapped_column(nullable=False)
-    entity_id: Mapped[str] = mapped_column(nullable=False)
+    # The column is uuid in the schema; entity_id has no foreign key, so without
+    # an explicit type SQLAlchemy infers VARCHAR and every insert fails with a
+    # DatatypeMismatch - which silently broke the whole audit-before-edit path.
+    entity_id: Mapped[str] = mapped_column(Uuid(), nullable=False)
     field: Mapped[str] = mapped_column(nullable=False)
     old_value: Mapped[str | None] = mapped_column(nullable=True)
     new_value: Mapped[str | None] = mapped_column(nullable=True)

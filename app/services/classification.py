@@ -237,10 +237,16 @@ def classify_excel_sheets(file_path: str) -> dict:
 
 
 def classify_zip(file_path: str) -> dict:
-    """Classify all supported files in a zip archive."""
+    """Classify all supported files in a zip archive.
+
+    Keys are sanitised basenames, matching ``ingestion.extract_zip`` so the
+    mapping choices made here line up with the commit step.
+    """
     import zipfile
     import pandas as pd
     from io import BytesIO
+
+    from app.services.ingestion import safe_filename
 
     results = {}
     with zipfile.ZipFile(file_path, 'r') as zf:
@@ -258,5 +264,5 @@ def classify_zip(file_path: str) -> dict:
                 df = pd.read_excel(BytesIO(content))
                 if any(str(c).startswith("Unnamed:") for c in df.columns):
                     df = pd.read_excel(BytesIO(content), header=1)
-            results[name] = _classify_dataframe(df)
+            results[safe_filename(name)] = _classify_dataframe(df)
     return results

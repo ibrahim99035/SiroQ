@@ -7,7 +7,6 @@
             <form hx-post="/applications/{{ row.application_id }}/explorer/cell" hx-swap="none" class="d-inline">
                 <input type="hidden" name="row_id" value="{{ row.id }}">
                 <input type="hidden" name="field" value="total_amount">
-                <input type="hidden" name="entity" value="sales">
                 <input type="number" step="0.01" name="value" value="{{ row.total_amount }}" class="form-control form-control-sm" style="width:120px">
                 <button class="btn btn-sm btn-outline-primary" type="submit">Save</button>
             </form>

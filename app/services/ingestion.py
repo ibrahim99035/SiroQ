@@ -13,6 +13,7 @@ Phase 2 additions:
 """
 import hashlib
 import os
+import re
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -21,11 +22,30 @@ from io import BytesIO
 import pandas as pd
 
 
+SAFE_NAME_FALLBACK = "upload"
+MAX_SAFE_NAME_LEN = 128
+_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def safe_filename(name: str) -> str:
+    """Reduce an uploaded/archived name to a safe basename.
+
+    Strips every directory component so ``../../etc/passwd`` cannot escape the
+    bronze root, drops leading dots, and replaces characters outside a small
+    allow-list. The human-readable original is kept separately on
+    ``datasets.original_filename``, which is only ever rendered as text.
+    """
+    base = os.path.basename(str(name).replace("\\", "/")).strip()
+    base = base.lstrip(".")
+    base = _UNSAFE_CHARS.sub("_", base)
+    return (base or SAFE_NAME_FALLBACK)[:MAX_SAFE_NAME_LEN]
+
+
 def save_bronze(content: bytes, bronze_root: str, association_id: str,
                 dataset_id: str, original_filename: str) -> str:
     directory = os.path.join(bronze_root, str(association_id), str(dataset_id))
     os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, original_filename)
+    path = os.path.join(directory, safe_filename(original_filename))
     with open(path, "wb") as f:
         f.write(content)
     return path
@@ -76,6 +96,14 @@ def _is_date(value) -> bool:
         return not pd.isna(pd.to_datetime(value, errors="coerce"))
     except (TypeError, ValueError):
         return False
+
+
+def parse_date(value):
+    """Parse a user-supplied date, raising ValueError when it is not a date."""
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError(f"not a date: {value!r}")
+    return parsed.to_pydatetime()
 
 
 def validate_rows(df, mapping,
@@ -213,14 +241,27 @@ def _row_text(value):
     return s or None
 
 
-def extract_zip(file_content: bytes) -> list[tuple[str, bytes]]:
-    """Extract all files from a zip archive. Returns list of (filename, content)."""
+def extract_zip(file_content: bytes,
+                max_uncompressed: int = None) -> list[tuple[str, bytes]]:
+    """Extract files from a zip archive. Returns list of (safe_name, content).
+
+    Names are reduced to plain basenames, so a crafted ``../../`` entry cannot
+    escape the bronze directory, and total decompression is capped so a zip bomb
+    cannot exhaust memory or disk. The cap mirrors ``MAX_ZIP_UNCOMPRESSED_BYTES``.
+    """
+    if max_uncompressed is None:
+        max_uncompressed = 200 * 1024 * 1024
     files = []
+    total = 0
     with zipfile.ZipFile(BytesIO(file_content), 'r') as zf:
-        for name in zf.namelist():
-            if not name.endswith('/'):  # skip directories
-                with zf.open(name) as f:
-                    files.append((name, f.read()))
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            total += info.file_size
+            if total > max_uncompressed:
+                raise ValueError("Zip archive expands beyond the allowed size limit")
+            with zf.open(info) as f:
+                files.append((safe_filename(info.filename), f.read()))
     return files
 
 
