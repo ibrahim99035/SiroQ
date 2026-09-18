@@ -8,8 +8,9 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from app.config import settings
+from app.models.models import Base
 
-target_metadata = None
+target_metadata = Base.metadata
 
 def run_migrations_offline():
     """Run migrations in 'offline' mode."""

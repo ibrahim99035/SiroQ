@@ -1,107 +1,97 @@
 from fastapi import APIRouter, Request, Depends, Form
 from fastapi.responses import RedirectResponse
+from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.database import get_session
+from app.dependencies import require_role
 from app.models.models import Users, Associations, Pharmacies
+from app.security import hash_password
+
+router = APIRouter(tags=["admin"])
+templates = Jinja2Templates(directory="app/templates")
+
+ADMIN_ROLE = require_role("association_admin")
+VALID_ROLES = ["association_admin", "pharmacy_manager", "analyst", "data_steward", "viewer"]
 
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+@router.get("/")
+def admin_home(request: Request, user: Users = Depends(ADMIN_ROLE)):
+    return templates.TemplateResponse(request, "admin/home.html", {"request": request, "user": user})
 
 
 @router.get("/associations")
-def associations_list(request: Request, db: Session = Depends(get_session)):
-    """List associations."""
-    from app.models.models import Associations
-    associations = db.query(Associations).all()
-    return {"associations": associations}
+def associations_list(request: Request, db: Session = Depends(get_session),
+                      user: Users = Depends(ADMIN_ROLE)):
+    associations = db.query(Associations).order_by(Associations.created_at).all()
+    return templates.TemplateResponse(
+        request, "admin/associations.html", {"request": request, "user": user,
+                                     "associations": associations}
+    )
 
 
 @router.post("/associations")
-def associations_create(
-    request: Request,
-    db: Session = Depends(get_session),
-    name: str = Form(...),
-):
-    """Create a new association."""
-    from app.models.models import Associations
+def associations_create(request: Request, db: Session = Depends(get_session),
+                        user: Users = Depends(ADMIN_ROLE),
+                        name: str = Form(...)):
     assoc = Associations(name=name)
     db.add(assoc)
     db.commit()
-    db.refresh(assoc)
-    return {"id": str(assoc.id)}
+    return RedirectResponse(url="/admin/associations", status_code=303)
 
 
 @router.get("/pharmacies")
-def pharmacies_list(request: Request, db: Session = Depends(get_session)):
-    """List pharmacies."""
-    from app.models.models import Pharmacies
-    pharmacies = db.query(Pharmacies).all()
-    return {"pharmacies": pharmacies}
+def pharmacies_list(request: Request, db: Session = Depends(get_session),
+                    user: Users = Depends(ADMIN_ROLE)):
+    pharmacies = db.query(Pharmacies).order_by(Pharmacies.name).all()
+    associations = db.query(Associations).all()
+    return templates.TemplateResponse(
+        request, "admin/pharmacies.html", {"request": request, "user": user,
+                                   "pharmacies": pharmacies, "associations": associations}
+    )
 
 
 @router.post("/pharmacies")
-def pharmacies_create(
-    request: Request,
-    db: Session = Depends(get_session),
-    name: str = Form(...),
-    association_id: str = Form(...),
-):
-    """Create a new pharmacy."""
-    from app.models.models import Associations, Pharmacies
+def pharmacies_create(request: Request, db: Session = Depends(get_session),
+                      user: Users = Depends(ADMIN_ROLE),
+                      name: str = Form(...), association_id: str = Form(...)):
     assoc = db.query(Associations).get(association_id)
-    if not assoc:
-        return {"error": "Association not found"}
-    pharmacy = Pharmacies(name=name, association_id=assoc.id)
-    db.add(pharmacy)
-    db.commit()
-    db.refresh(pharmacy)
-    return {"id": str(pharmacy.id)}
+    if assoc:
+        db.add(Pharmacies(name=name, association_id=assoc.id))
+        db.commit()
+    return RedirectResponse(url="/admin/pharmacies", status_code=303)
 
 
 @router.get("/users")
-def users_list(request: Request, db: Session = Depends(get_session)):
-    """List users."""
-    from app.models.models import Users
-    users = db.query(Users).all()
-    return {"users": users}
+def users_list(request: Request, db: Session = Depends(get_session),
+               user: Users = Depends(ADMIN_ROLE)):
+    users = db.query(Users).order_by(Users.email).all()
+    pharmacies = db.query(Pharmacies).all()
+    return templates.TemplateResponse(
+        request, "admin/users.html", {"request": request, "user": user, "users": users,
+                              "pharmacies": pharmacies, "valid_roles": VALID_ROLES}
+    )
 
 
 @router.post("/users")
-def users_create(
-    request: Request,
-    db: Session = Depends(get_session),
-    email: str = Form(...),
-    full_name: str = Form(...),
-    role: str = Form(...),
-    pharmacy_id: str | None = Form(None),
-):
-    """Create a new user."""
-    from app.models.models import Users, Associations, Pharmacies
-    from app.security import hash_password
-    from app.dependencies import require_role
-
-    valid_roles = ["association_admin", "pharmacy_manager", "analyst", "data_steward", "viewer"]
-    if role not in valid_roles:
-        return {"error": f"Invalid role. Must be one of {valid_roles}"}
-
-    # Check role permission for pharmacy_id
+def users_create(request: Request, db: Session = Depends(get_session),
+                 user: Users = Depends(ADMIN_ROLE),
+                 email: str = Form(...), full_name: str = Form(...),
+                 role: str = Form(...), pharmacy_id: str | None = Form(None)):
+    if role not in VALID_ROLES:
+        return RedirectResponse(url="/admin/users", status_code=303)
+    if role == "association_admin" and pharmacy_id:
+        pharmacy_id = None  # admins are always association-wide
     if role in ("pharmacy_manager", "data_steward") and not pharmacy_id:
-        return {"error": f"Role '{role}' requires a pharmacy_id"}
-
-    user = Users(
+        return RedirectResponse(url="/admin/users", status_code=303)
+    new_user = Users(
         email=email,
         hashed_password=hash_password("ChangeMe123!"),
         full_name=full_name,
         role=role,
+        association_id=user.association_id,
+        pharmacy_id=pharmacy_id or None,
     )
-
-    if pharmacy_id:
-        pharmacy = db.query(Pharmacies).get(pharmacy_id)
-        if pharmacy:
-            user.pharmacy_id = pharmacy.id
-
-    db.add(user)
+    db.add(new_user)
     db.commit()
-    db.refresh(user)
-    return {"id": str(user.id), "role": user.role, "pharmacy_id": str(user.pharmacy_id) if user.pharmacy_id else None}
+    return RedirectResponse(url="/admin/users", status_code=303)

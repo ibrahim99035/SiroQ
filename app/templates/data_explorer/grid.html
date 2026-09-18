@@ -2,27 +2,20 @@
 {% block title %}Data Explorer{% endblock %}
 {% block content %}
 <h2>Data Explorer</h2>
+<p class="text-muted">Live Silver data for application <code>{{ application_id }}</code>. Edits are audit-logged and reversible.</p>
 
-<select id="entity-selector" class="form-select mb-3">
-    <option value="sales">Sales</option>
-    <option value="inventory_events">Inventory Events</option>
-    <option value="products">Products</option>
-</select>
-
-<div id="grid-container">
-    <!-- Grid will be loaded by HTMX -->
+<div id="grid-container" hx-get="/applications/{{ application_id }}/explorer/rows" hx-trigger="load" hx-swap="innerHTML">
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Payment</th>
+                <th>Total</th>
+                <th>Edit</th>
+                <th>Revert</th>
+            </tr>
+        </thead>
+        <tbody><tr><td colspan="5" class="text-muted">Loading…</td></tr></tbody>
+    </table>
 </div>
-
-<script>
-    // Load initial grid
-    htmx.onLoad(function() {
-        htmx.trigger('getGridRows', 'sales');
-    });
-
-    // Handle entity selection
-    document.getElementById('entity-selector').addEventListener('change', function() {
-        const entity = this.value;
-        htmx.trigger('getGridRows', entity);
-    });
-</script>
 {% endblock %}

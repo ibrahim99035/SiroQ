@@ -1,16 +1,29 @@
 {% extends "base.html" %}
 {% block title %}Mapping Result{% endblock %}
 {% block content %}
-<h2>Mapping Result</h2>
-<p>Dataset has been {{ status }}.</p>
+<h2>Dataset: {{ status }}</h2>
 
-<h3>Confirmed Mapping Profile</h3>
-<p>Mapping profile created with {{ field_map|length }} field mappings.</p>
+{% if message %}
+<div class="alert {% if status == 'committed' %}alert-success{% else %}alert-danger{% endif %}">{{ message }}</div>
+{% endif %}
 
-<h3>Next Steps</h3>
+{% if errors %}
+<h3>Excluded rows</h3>
+<table class="table table-sm">
+    <thead><tr><th>Row</th><th>Reason</th></tr></thead>
+    <tbody>
+    {% for err in errors %}
+        <tr><td>{{ err.row }}</td><td>{{ err.reasons|join(", ") }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+<p class="text-muted">Valid rows were still committed (partial success).</p>
+{% endif %}
+
+<h4>Next steps</h4>
 <ul>
-    <li>View data in the Data Explorer</li>
-    <li>Run analytics on the dashboard</li>
+    <li><a href="/applications/{{ application_id }}/explorer">View data in the Data Explorer</a></li>
+    <li><a href="/dashboards/sales">View the sales dashboard</a></li>
 </ul>
 
 <a href="/applications" class="btn btn-secondary">Back to Applications</a>

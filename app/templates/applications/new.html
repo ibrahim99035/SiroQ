@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}New Application{% endblock %}
+{% block content %}
+<h2>New Application</h2>
+<form method="POST" action="/applications/new" class="row g-3">
+    <div class="col-md-6"><label class="form-label">Name</label>
+        <input class="form-control" name="name" required></div>
+    <div class="col-md-6"><label class="form-label">Source type</label>
+        <input class="form-control" name="source_type" value="manual_upload"></div>
+    <div class="col-md-6">
+        <label class="form-label">Scope (leave blank for multi-pharmacy)</label>
+        <select class="form-select" name="pharmacy_id">
+            <option value="">Multi-pharmacy</option>
+            {% for p in pharmacies %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+        </select>
+    </div>
+    <div class="col-12"><button class="btn btn-primary">Create</button></div>
+</form>
+{% endblock %}

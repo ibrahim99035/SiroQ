@@ -4,9 +4,15 @@
 <h2>Sales Dashboard</h2>
 
 <div class="row">
-    {% include "components/kpi_tile.html" with title="Total Revenue" value="$" label="0.00" %}
-    {% include "components/kpi_tile.html" with title="Transactions" value="0" label="Count" %}
-    {% include "components/kpi_tile.html" with title="Avg Basket" value="$" label="0.00" %}
+    {% with title="Total Revenue", value="$", label="0.00" %}
+        {% include "components/kpi_tile.html" %}
+    {% endwith %}
+    {% with title="Transactions", value="0", label="Count" %}
+        {% include "components/kpi_tile.html" %}
+    {% endwith %}
+    {% with title="Avg Basket", value="$", label="0.00" %}
+        {% include "components/kpi_tile.html" %}
+    {% endwith %}
 </div>
 
 <div class="row mt-3">
