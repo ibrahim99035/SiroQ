@@ -4,6 +4,7 @@ Prefix: /applications (wired in app/main.py). The dataset confirm route is also
 exposed as a dedicated top-level ``datasets_router`` so the browser can post to
 ``/datasets/{id}/confirm``.
 """
+import hashlib
 import os
 import uuid
 
@@ -112,6 +113,25 @@ def step1_upload_post(request: Request, app_id: str,
         return HTMLResponse("<h1>Not found</h1>", status_code=404)
     filename = file.filename or "upload.csv"
     content = file.file.read()
+    content_hash = hashlib.sha256(content).hexdigest()
+
+    # Idempotency: refuse a byte-identical file that already committed for this
+    # application, because re-committing it would silently double revenue.
+    already = db.query(Datasets).filter(
+        Datasets.application_id == app.id,
+        Datasets.content_hash == content_hash,
+        Datasets.status == "committed",
+    ).first()
+    if already:
+        return templates.TemplateResponse(
+            request, "uploads/step3_result.html",
+            {"request": request, "user": user, "status": "duplicate",
+             "message": "This exact file was already committed for this "
+                        f"application on {already.uploaded_at:%Y-%m-%d %H:%M}. "
+                        "Re-uploading it would double the reported revenue, so it "
+                        "was not accepted.",
+             "application_id": app.id},
+        )
     
     # Check if it's a zip file
     is_zip = filename.lower().endswith(".zip")
@@ -124,6 +144,7 @@ def step1_upload_post(request: Request, app_id: str,
         application_id=app.id,
         bronze_file_path="",  # set after saving below
         original_filename=filename,
+        content_hash=content_hash,
         uploaded_by=user.id,
         status="pending_mapping",
     )

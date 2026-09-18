@@ -2,7 +2,7 @@
 queries only ever see rows in the caller's tenant (and pharmacy scope).
 """
 from datetime import date, datetime, timedelta
-from sqlalchemy import func, case, and_, or_, text, desc, distinct, extract
+from sqlalchemy import func, case, and_, or_, text, desc, distinct, extract, String
 from sqlalchemy.orm import aliased
 
 from app.models.models import (
@@ -33,8 +33,12 @@ def _currency(db, association_id) -> str:
 
 
 def sales_kpis(db, association_id, pharmacy_id=None):
+    # A POS receipt whose lines arrive as one row each must count as ONE
+    # transaction. Group by the transaction key when the source provided one,
+    # otherwise fall back to the row id (one row = one transaction).
+    tx_key = func.coalesce(Sales.transaction_ref, func.cast(Sales.id, String))
     q = db.query(
-        func.count(Sales.id),
+        func.count(distinct(tx_key)),
         func.coalesce(func.sum(Sales.total_amount), 0),
     ).filter(Sales.association_id == association_id)
     if pharmacy_id:

@@ -100,7 +100,7 @@ def tenant():
         # Capture ids before commit: commit expires ORM attributes, and reloading
         # them afterwards would re-enter the RLS-gated SELECT.
         ids = {"assoc": assoc_id, "ph_a": ph_a.id, "ph_b": ph_b.id,
-               "product": product.id, "batch": batch.id}
+               "product": product.id, "batch": batch.id, "app": app.id}
         db.commit()
 
         yield ids
@@ -133,6 +133,33 @@ def test_sales_kpis_series_honours_pharmacy_scope(tenant):
         assert k["transactions"] == 1
         # the chart data must reflect the same scope as the tiles
         assert k["revenues"] == [100.0]
+    finally:
+        db.close()
+
+
+def test_transactions_count_distinct_receipts(tenant):
+    """Regression: a receipt whose lines arrive as separate rows must count as
+    ONE transaction, not one per row."""
+    db = SessionLocal()
+    try:
+        _ctx(db, tenant["assoc"])
+        # two rows that belong to the same receipt R-1
+        for amount in (10.0, 5.0):
+            db.add(Sales(id=str(uuid.uuid4()), association_id=tenant["assoc"],
+                         pharmacy_id=tenant["ph_a"], application_id=tenant["app"],
+                         sale_timestamp=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+                         total_amount=amount, currency="EGP", transaction_ref="R-1"))
+        db.commit()
+
+        # The tenant context is transaction-local, so a commit ends it; re-set it
+        # exactly as the per-request dependency does in the running app.
+        _ctx(db, tenant["assoc"])
+
+        k = sales_kpis(db, tenant["assoc"])
+        # ph_a standalone sale + receipt R-1 + ph_b sale
+        assert k["transactions"] == 3
+        assert k["total_revenue"] == 165.0
+        assert k["avg_basket"] == pytest.approx(55.0)
     finally:
         db.close()
 

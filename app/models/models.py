@@ -6,6 +6,7 @@ from app.database import Base
 from sqlalchemy import (
     Uuid,
     Text,
+    String,
     Numeric,
     Boolean,
     ForeignKey,
@@ -188,6 +189,7 @@ class Datasets(Base):
     )
     bronze_file_path: Mapped[str] = mapped_column(nullable=False)
     original_filename: Mapped[str] = mapped_column(nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     uploaded_by: Mapped[str] = mapped_column(
         ForeignKey("users.id"), nullable=False
     )
@@ -328,6 +330,7 @@ class Sales(Base):
     total_amount: Mapped[float] = mapped_column(
         Numeric(12, 2), nullable=False
     )
+    transaction_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     currency: Mapped[str] = mapped_column(Text(3), nullable=False, default="USD")
     extra_attributes: Mapped[Dict[str, Any]] = mapped_column(
         JSON, default=lambda: {}

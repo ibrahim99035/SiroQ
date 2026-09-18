@@ -171,6 +171,7 @@ def commit_dataset(db, association_id, application_id, dataset_id, df,
             sale_timestamp=_row_ts(row_rec.get("sale_timestamp"), now),
             payment_method=_row_text(row_rec.get("payment_method")),
             total_amount=_number(row_rec.get("total_amount")) or 0,
+            transaction_ref=_row_text(row_rec.get("transaction_ref")),
             currency=currency or "USD",
             extra_attributes={},
         )

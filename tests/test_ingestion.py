@@ -188,6 +188,31 @@ def test_multi_pharmacy_gate_blocks_then_commits(admin_session):
                                        '"total_amount":"total_amount"}',
                           "pharmacy_identifier_column": "pharmacy"})
     assert "committed" in r.text, r.text
+def test_duplicate_upload_is_blocked(admin_session):
+    """A byte-identical file that already committed must not be accepted again,
+    because re-committing silently doubles revenue."""
+    client = admin_session
+    app_id = _create_application(client, "Dup Test", _demo_pharmacy_id())
+    content = _read("clean.csv")
+    field_map = ('{"product_name":"product_name","sale_timestamp":"sale_timestamp",'
+                 '"quantity":"quantity","unit_price":"unit_price",'
+                 '"total_amount":"total_amount","payment_method":"payment_method"}')
+
+    r = client.post(f"/applications/{app_id}/upload",
+                    files={"file": ("clean.csv", content, "text/csv")},
+                    follow_redirects=False)
+    assert r.status_code == 303, r.text
+    dataset_id = r.headers["location"].rstrip("/").rsplit("/", 2)[-2]
+    conf = client.post(f"/datasets/{dataset_id}/confirm", data={"field_map": field_map})
+    assert "committed" in conf.text, conf.text
+
+    dup = client.post(f"/applications/{app_id}/upload",
+                      files={"file": ("clean.csv", content, "text/csv")},
+                      follow_redirects=False)
+    assert dup.status_code == 200, dup.status_code
+    assert "already committed" in dup.text, dup.text[:400]
+
+
 def test_clean_single_pharmacy_commit(client, seeded_db):
     r = client.post("/login", data={"email": "steward@siroq.local", "password": "ChangeMe123!"},
                     follow_redirects=False)

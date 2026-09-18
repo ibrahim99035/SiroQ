@@ -50,6 +50,17 @@ def _visible_pharmacy_names(engine, assoc_id, names):
     return [r[0] for r in rows if r[0] in names]
 
 
+def test_unset_tenant_context_returns_no_rows_not_error():
+    """Regression: an empty tenant variable used to raise a uuid cast error
+    instead of simply hiding every row. Isolation must fail *closed*."""
+    eng = _app_engine()
+    with eng.begin() as conn:
+        # the empty string a finished transaction-local set_config leaves behind
+        conn.execute(text("SELECT set_config('app.current_association_id', '', true)"))
+        n = conn.execute(text("SELECT count(*) FROM pharmacies")).scalar()
+    assert n == 0
+
+
 def test_rls_flags_and_flavor():
     eng = _owner_engine()
     with eng.connect() as conn:
