@@ -6,6 +6,7 @@ from app.database import Base
 from sqlalchemy import (
     Uuid,
     Text,
+    String,
     Numeric,
     Boolean,
     ForeignKey,
@@ -33,10 +34,10 @@ class Associations(Base):
     name: Mapped[str] = mapped_column(nullable=False)
     country: Mapped[str | None] = mapped_column(nullable=True)
     default_currency: Mapped[str] = mapped_column(
-        Text(3), nullable=False, default="USD"
+        Text(3), nullable=False, default="EGP"
     )
     default_timezone: Mapped[str] = mapped_column(
-        Text(32), nullable=False, default="UTC"
+        Text(32), nullable=False, default="Africa/Cairo"
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
@@ -188,6 +189,7 @@ class Datasets(Base):
     )
     bronze_file_path: Mapped[str] = mapped_column(nullable=False)
     original_filename: Mapped[str] = mapped_column(nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     uploaded_by: Mapped[str] = mapped_column(
         ForeignKey("users.id"), nullable=False
     )
@@ -328,6 +330,7 @@ class Sales(Base):
     total_amount: Mapped[float] = mapped_column(
         Numeric(12, 2), nullable=False
     )
+    transaction_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     currency: Mapped[str] = mapped_column(Text(3), nullable=False, default="USD")
     extra_attributes: Mapped[Dict[str, Any]] = mapped_column(
         JSON, default=lambda: {}
@@ -560,7 +563,9 @@ class Alerts(Base):
         ForeignKey("alert_rules.id"), nullable=False
     )
     entity_type: Mapped[str] = mapped_column(Text(30), nullable=False)
-    entity_id: Mapped[str] = mapped_column(nullable=False)
+    # No foreign key, so SQLAlchemy would infer VARCHAR while the schema column
+    # is uuid (same drift that broke edit_audit_log writes); keep them aligned.
+    entity_id: Mapped[str] = mapped_column(Uuid(), nullable=False)
     metric_value: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
     threshold_value: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
     severity: Mapped[str] = mapped_column(Text(20), nullable=False)
@@ -589,7 +594,10 @@ class EditAuditLog(Base):
         ForeignKey("associations.id"), nullable=False
     )
     entity_type: Mapped[str] = mapped_column(nullable=False)
-    entity_id: Mapped[str] = mapped_column(nullable=False)
+    # The column is uuid in the schema; entity_id has no foreign key, so without
+    # an explicit type SQLAlchemy infers VARCHAR and every insert fails with a
+    # DatatypeMismatch - which silently broke the whole audit-before-edit path.
+    entity_id: Mapped[str] = mapped_column(Uuid(), nullable=False)
     field: Mapped[str] = mapped_column(nullable=False)
     old_value: Mapped[str | None] = mapped_column(nullable=True)
     new_value: Mapped[str | None] = mapped_column(nullable=True)

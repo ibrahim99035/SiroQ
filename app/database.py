@@ -15,5 +15,14 @@ Base = declarative_base()
 
 
 def get_session():
-    """Dependency to get a SQLAlchemy session per request."""
-    return SessionLocal()
+    """Dependency to get a SQLAlchemy session per request.
+
+    Yield-style so the session is always closed when the request ends, even on
+    an exception. Previously the bare session was returned and never closed,
+    leaking a connection from the pool on every request.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

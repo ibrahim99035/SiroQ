@@ -4,6 +4,7 @@ Prefix: /applications (wired in app/main.py). The dataset confirm route is also
 exposed as a dedicated top-level ``datasets_router`` so the browser can post to
 ``/datasets/{id}/confirm``.
 """
+import hashlib
 import os
 import uuid
 
@@ -111,7 +112,37 @@ def step1_upload_post(request: Request, app_id: str,
     if not app:
         return HTMLResponse("<h1>Not found</h1>", status_code=404)
     filename = file.filename or "upload.csv"
-    content = file.file.read()
+    max_bytes = int(request.app.state.settings.MAX_UPLOAD_BYTES)
+    # Read one byte past the limit so an oversized upload is detected without
+    # first buffering the whole file into memory.
+    content = file.file.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        return templates.TemplateResponse(
+            request, "uploads/step3_result.html",
+            {"request": request, "user": user, "status": "rejected",
+             "message": f"File exceeds the {max_bytes // (1024 * 1024)} MB upload "
+                        "limit and was not accepted.",
+             "application_id": app.id},
+        )
+    content_hash = hashlib.sha256(content).hexdigest()
+
+    # Idempotency: refuse a byte-identical file that already committed for this
+    # application, because re-committing it would silently double revenue.
+    already = db.query(Datasets).filter(
+        Datasets.application_id == app.id,
+        Datasets.content_hash == content_hash,
+        Datasets.status == "committed",
+    ).first()
+    if already:
+        return templates.TemplateResponse(
+            request, "uploads/step3_result.html",
+            {"request": request, "user": user, "status": "duplicate",
+             "message": "This exact file was already committed for this "
+                        f"application on {already.uploaded_at:%Y-%m-%d %H:%M}. "
+                        "Re-uploading it would double the reported revenue, so it "
+                        "was not accepted.",
+             "application_id": app.id},
+        )
     
     # Check if it's a zip file
     is_zip = filename.lower().endswith(".zip")
@@ -124,6 +155,7 @@ def step1_upload_post(request: Request, app_id: str,
         application_id=app.id,
         bronze_file_path="",  # set after saving below
         original_filename=filename,
+        content_hash=content_hash,
         uploaded_by=user.id,
         status="pending_mapping",
     )
@@ -206,7 +238,10 @@ def bulk_mapping_confirm(request: Request, dataset_id: str,
     all_errors = []
     
     if file_path.lower().endswith(".zip"):
-        extracted = ingestion.extract_zip(open(file_path, "rb").read())
+        extracted = ingestion.extract_zip(
+            open(file_path, "rb").read(),
+            max_uncompressed=request.app.state.settings.zip_cap(),
+        )
         for filename, content in extracted:
             if filename.lower().endswith((".csv", ".xlsx", ".xls")):
                 # Save extracted file temporarily
@@ -326,6 +361,8 @@ def dataset_confirm(dataset_id: str, request: Request,
         return HTMLResponse("<h1>Not found</h1>", status_code=404)
     app = db.get(Applications, dataset.application_id)
     app_id = app.id
+    assoc = db.get(Associations, app.association_id)
+    currency = assoc.default_currency if assoc and assoc.default_currency else "EGP"
 
 # ---- HARD GATE: a multi-pharmacy dataset must name its pharmacy column
     if app.pharmacy_id is None and not (pharmacy_identifier_column or app.pharmacy_identifier_column):
@@ -345,7 +382,7 @@ def dataset_confirm(dataset_id: str, request: Request,
     if app.pharmacy_id is not None:
         committed, errors, _ = ingestion.commit_dataset(
             db, app.association_id, app.id, dataset.id, df, field_map,
-            app.pharmacy_id, user.id)
+            app.pharmacy_id, user.id, currency=currency)
     else:
         col = pharmacy_identifier_column or app.pharmacy_identifier_column
         if col:
@@ -354,7 +391,7 @@ def dataset_confirm(dataset_id: str, request: Request,
                 ph_id = mapping_service.resolve_pharmacy(db, app.association_id, row.get(col))
                 c, e, _ = ingestion.commit_dataset(
                     db, app.association_id, app.id, dataset.id, df.iloc[[i]], field_map,
-                    ph_id, user.id)
+                    ph_id, user.id, currency=currency)
                 committed += c
                 for err in e:
                     errors.append(err)
@@ -383,12 +420,35 @@ def explorer_page(request: Request, app_id: str, db: Session = Depends(get_sessi
 def explorer_rows(request: Request, app_id: str, entity: str = "sales",
                   db: Session = Depends(get_session),
                   user: Users = Depends(require_role(*EDIT_ROLES))):
-    rows = db.query(Sales).filter(Sales.application_id == app_id).order_by(
-        Sales.sale_timestamp.desc()).limit(200).all()
+    q = db.query(Sales).filter(Sales.application_id == app_id)
+    if user.pharmacy_id:
+        q = q.filter(Sales.pharmacy_id == user.pharmacy_id)
+    rows = q.order_by(Sales.sale_timestamp.desc()).limit(200).all()
     return templates.TemplateResponse(
         request, "data_explorer/_grid_rows.html", {"request": request, "user": user,
                                            "entity": entity, "rows": rows}
     )
+
+
+# Only these sale columns may be edited from the Data Explorer. Anything else is
+# refused, so a client cannot overwrite an association/foreign key via the grid.
+EDITABLE_SALE_FIELDS = {
+    "sale_timestamp", "payment_method", "total_amount", "transaction_ref", "currency",
+}
+
+
+def _load_editable_sale(db, user, row_id):
+    """Load a sale for editing, enforcing pharmacy scope on writes.
+
+    RLS confines reads to the association; a pharmacy-scoped role must also be
+    stopped from editing another branch's rows, which RLS alone does not do.
+    """
+    row = db.query(Sales).get(row_id)
+    if not row:
+        return None, HTMLResponse("missing", status_code=404)
+    if user.pharmacy_id and str(row.pharmacy_id) != str(user.pharmacy_id):
+        return None, HTMLResponse("forbidden", status_code=403)
+    return row, None
 
 
 @router.post("/{app_id}/explorer/cell")
@@ -396,25 +456,38 @@ def explorer_cell(app_id: str, request: Request,
                   db: Session = Depends(get_session),
                   user: Users = Depends(require_role(*EDIT_ROLES)),
                   row_id: str = Form(...), field: str = Form(...),
-                  value: str = Form(...), entity: str = Form("sales")):
-    row = db.query(Sales).get(row_id)
-    if not row:
-        return HTMLResponse("missing", status_code=404)
+                  value: str = Form(...)):
+    if field not in EDITABLE_SALE_FIELDS:
+        return HTMLResponse(f"field not editable: {field}", status_code=400)
+    row, error = _load_editable_sale(db, user, row_id)
+    if error is not None:
+        return error
+    try:
+        new_value = _cast(field, value)
+    except ValueError as exc:
+        return HTMLResponse(str(exc), status_code=400)
     old_value = getattr(row, field)
     # Audit FIRST (before applying the change) in the same transaction
-    audit_service.log_edit(db, user.association_id, user.id, entity, row.id, field,
-                           old_value, value, reason="cell edit")
-    setattr(row, field, _cast(field, value))
+    audit_service.log_edit(db, user.association_id, user.id, "sales", row.id, field,
+                           old_value, new_value, reason="cell edit")
+    setattr(row, field, new_value)
     db.commit()
     return HTMLResponse("ok")
 
 
 def _cast(field, value):
-    if field in ("total_amount", "unit_price", "quantity"):
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return value
+    """Convert a client-supplied value to the column's type.
+
+    Raises ValueError for input that cannot be stored in that column, so the
+    caller can answer 400 instead of letting the database raise a 500.
+    """
+    if field == "total_amount":
+        number = ingestion._number(value)
+        if number is None:
+            raise ValueError("total_amount must be a number")
+        return number
+    if field == "sale_timestamp":
+        return ingestion.parse_date(value)
     return value
 
 
@@ -425,13 +498,19 @@ def explorer_revert(app_id: str, edit_id: str, request: Request,
     edit = db.query(EditAuditLog).get(edit_id)
     if not edit:
         return HTMLResponse("missing", status_code=404)
-    row = db.query(Sales).get(edit.entity_id)
-    if not row:
-        return HTMLResponse("missing", status_code=404)
+    if edit.field not in EDITABLE_SALE_FIELDS:
+        return HTMLResponse(f"field not editable: {edit.field}", status_code=400)
+    row, error = _load_editable_sale(db, user, edit.entity_id)
+    if error is not None:
+        return error
+    try:
+        restored = _cast(edit.field, edit.old_value)
+    except ValueError as exc:
+        return HTMLResponse(str(exc), status_code=400)
     current = getattr(row, edit.field)
     # Write a NEW audit row restoring the value; the original trail is kept.
-    audit_service.log_edit(db, user.association_id, user.id, edit.entity_type,
-                           row.id, edit.field, current, edit.old_value, reason="revert")
-    setattr(row, edit.field, _cast(edit.field, edit.old_value))
+    audit_service.log_edit(db, user.association_id, user.id, "sales",
+                           row.id, edit.field, current, restored, reason="revert")
+    setattr(row, edit.field, restored)
     db.commit()
     return HTMLResponse("ok")

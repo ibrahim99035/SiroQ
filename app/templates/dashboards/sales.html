@@ -4,13 +4,13 @@
 <h2>Sales Dashboard</h2>
 
 <div class="row">
-    {% with title="Total Revenue", value="$", label="0.00" %}
+    {% with title="Total Revenue", value=currency ~ " " ~ "%.2f"|format(total_revenue), label="" %}
         {% include "components/kpi_tile.html" %}
     {% endwith %}
-    {% with title="Transactions", value="0", label="Count" %}
+    {% with title="Transactions", value=transactions, label="Count" %}
         {% include "components/kpi_tile.html" %}
     {% endwith %}
-    {% with title="Avg Basket", value="$", label="0.00" %}
+    {% with title="Avg Basket", value=currency ~ " " ~ "%.2f"|format(avg_basket), label="" %}
         {% include "components/kpi_tile.html" %}
     {% endwith %}
 </div>

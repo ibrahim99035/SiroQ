@@ -16,11 +16,16 @@ app.state.settings = settings
 
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.middleware import SameOriginGuard
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.SECRET_KEY,
     same_site="lax",
 )
+# Added after the session middleware, so it wraps it and rejects cross-site
+# posts before any session work happens.
+app.add_middleware(SameOriginGuard)
 
 # Mount static files (bootstrap RTL + custom.css are served from here)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

@@ -63,6 +63,83 @@ def test_clean_csv_classification():
     # but product_name and quantity should be clear
 
 
+# ---------------------------------------------------------------- mapping safety
+def test_mapping_never_assigns_a_date_column_to_a_number_field():
+    """Regression: a weak or absent header must not let the content pass hand a
+    date column to a numeric field. This used to map ``total_amount`` onto
+    "Sale Date" and mark it *confirmed*, turning revenue into 0 silently."""
+    import pandas as pd
+    from app.services.classification import _classify_dataframe
+
+    df = pd.DataFrame({
+        "Sale Date": ["2026-09-01", "2026-09-02", "2026-09-03"],
+        "Item": ["Paracetamol", "Ibuprofen", "Amoxicillin"],
+        "Qty": [2, 1, 5],
+        "Price": [1.5, 2.0, 1.0],
+        "Payment": ["card", "cash", "card"],
+    })
+    fs = _classify_dataframe(df)["field_scores"]
+
+    # The date column belongs to the date field only.
+    assert fs["sale_timestamp"]["suggested_mapping"] == "Sale Date", fs["sale_timestamp"]
+    for field in ("quantity", "unit_price", "total_amount"):
+        assert fs[field]["suggested_mapping"] != "Sale Date", (field, fs[field])
+        # and no numeric field may be confirmed against date content
+        for sample in fs[field]["sample_values"]:
+            assert "2026-09-01" not in sample, (field, fs[field])
+
+
+def test_content_pass_does_not_reuse_a_single_column():
+    """One source column may back at most one canonical field."""
+    import pandas as pd
+    from app.services.classification import _classify_dataframe
+
+    fs = _classify_dataframe(pd.DataFrame({"Value": [1.5, 2.0, 3.5, 4.0]}))["field_scores"]
+    reused = [f for f in ("quantity", "unit_price", "total_amount")
+              if fs[f]["suggested_mapping"] == "Value"]
+    assert len(reused) <= 1, reused
+
+
+# ---------------------------------------------------------------- date integrity
+def _sales_frame(dates):
+    import pandas as pd
+    return pd.DataFrame({
+        "product_name": ["Paracetamol", "Ibuprofen"],
+        "sale_timestamp": dates,
+        "quantity": [2, 1],
+        "unit_price": [1.5, 2.0],
+        "total_amount": [3.0, 2.0],
+    })
+
+
+_SALES_MAPPING = {"product_name": "product_name", "sale_timestamp": "sale_timestamp",
+                  "quantity": "quantity", "unit_price": "unit_price",
+                  "total_amount": "total_amount"}
+
+
+def test_unparseable_date_is_rejected_not_defaulted_to_now():
+    df = _sales_frame(["2026-09-01", "not-a-date"])
+    valid, errors = ingestion.validate_rows(df, _SALES_MAPPING)
+    assert len(valid) == 1, (valid, errors)
+    reasons = " ".join(r for e in errors for r in e["reasons"])
+    assert "unparseable sale_timestamp" in reasons, reasons
+
+
+def test_missing_mapped_date_is_rejected():
+    df = _sales_frame(["2026-09-01", ""])
+    valid, errors = ingestion.validate_rows(df, _SALES_MAPPING)
+    assert len(valid) == 1, (valid, errors)
+    reasons = " ".join(r for e in errors for r in e["reasons"])
+    assert "missing sale_timestamp" in reasons, reasons
+
+
+def test_valid_dates_still_commit():
+    df = _sales_frame(["2026-09-01", "2026-09-02"])
+    valid, errors = ingestion.validate_rows(df, _SALES_MAPPING)
+    assert len(valid) == 2, (valid, errors)
+    assert not errors, errors
+
+
 # ---------------------------------------------------------------- end-to-end via the app
 def _create_application(client, name, pharmacy_id=None):
     data = {"name": name, "source_type": "manual_upload"}
@@ -111,6 +188,31 @@ def test_multi_pharmacy_gate_blocks_then_commits(admin_session):
                                        '"total_amount":"total_amount"}',
                           "pharmacy_identifier_column": "pharmacy"})
     assert "committed" in r.text, r.text
+def test_duplicate_upload_is_blocked(admin_session):
+    """A byte-identical file that already committed must not be accepted again,
+    because re-committing silently doubles revenue."""
+    client = admin_session
+    app_id = _create_application(client, "Dup Test", _demo_pharmacy_id())
+    content = _read("clean.csv")
+    field_map = ('{"product_name":"product_name","sale_timestamp":"sale_timestamp",'
+                 '"quantity":"quantity","unit_price":"unit_price",'
+                 '"total_amount":"total_amount","payment_method":"payment_method"}')
+
+    r = client.post(f"/applications/{app_id}/upload",
+                    files={"file": ("clean.csv", content, "text/csv")},
+                    follow_redirects=False)
+    assert r.status_code == 303, r.text
+    dataset_id = r.headers["location"].rstrip("/").rsplit("/", 2)[-2]
+    conf = client.post(f"/datasets/{dataset_id}/confirm", data={"field_map": field_map})
+    assert "committed" in conf.text, conf.text
+
+    dup = client.post(f"/applications/{app_id}/upload",
+                      files={"file": ("clean.csv", content, "text/csv")},
+                      follow_redirects=False)
+    assert dup.status_code == 200, dup.status_code
+    assert "already committed" in dup.text, dup.text[:400]
+
+
 def test_clean_single_pharmacy_commit(client, seeded_db):
     r = client.post("/login", data={"email": "steward@siroq.local", "password": "ChangeMe123!"},
                     follow_redirects=False)

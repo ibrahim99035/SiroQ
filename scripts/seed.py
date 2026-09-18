@@ -38,6 +38,11 @@ def idempotent_create():
             db.add(assoc)
             db.flush()
             print(f"Created association: {assoc.id}")
+        # Egypt market defaults, applied idempotently
+        assoc.country = assoc.country or "EG"
+        assoc.default_currency = "EGP"
+        assoc.default_timezone = "Africa/Cairo"
+        db.flush()
 
         # 2. Pharmacy "Demo Branch 1"
         pharm = db.execute(
