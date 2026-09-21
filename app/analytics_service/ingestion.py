@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -94,110 +95,92 @@ def read_file(content: bytes, filename: str) -> IngestedFile:
     )
 
 
+_TOKEN_RE = re.compile(r"[^0-9a-z]+")
+
+# Strong tokens are distinctive identifiers a category alone owns; weak tokens
+# are shared, generic evidence (amount, id, date ...). Strong hits count 3x.
+_STRONG_TOKENS = {
+    "sales": {"sale", "transaction", "receipt", "basket", "register", "pos",
+              "checkout", "invoice", "cash"},
+    "inventory": {"hand", "batch", "lot", "expiry", "expiration", "stock",
+                  "inventory", "writeoff", "reorder", "damage", "waste"},
+    "prescriptions": {"rx", "prescriber", "supply", "refill", "controlled",
+                      "schedule", "ndc", "medication"},
+    "patients": {"birth", "patient", "chronic", "adherence", "loyalty",
+                 "demographic", "age", "gender"},
+    "products": {"sku", "ndc", "generic", "brand", "strength", "therapeutic",
+                 "dosage", "formulation", "shelf", "storage"},
+    "suppliers": {"vendor", "supplier", "fill", "rate", "lead", "contract",
+                  "distributor"},
+    "purchase_orders": {"po", "ordered", "ordered_quantity", "delivery", "cost",
+                        "unit_cost", "expected", "received"},
+    "payers": {"payer", "claim", "rejection", "copay", "coinsurance", "plan",
+               "deductible", "dir", "billed", "paid"},
+}
+
+_WEAK_TOKENS = {
+    "sales": {"amount", "total", "payment", "price", "tax", "discount",
+              "insurance", "ref", "devices", "number"},
+    "inventory": {"quantity", "balance", "received", "warehouse", "location",
+                  "cost", "unit"},
+    "prescriptions": {"drug", "patient", "date", "filled", "pharmacy",
+                      "quantity", "copy", "amount"},
+    "patients": {"name", "phone", "email", "first", "last", "seen", "address",
+                 "age"},
+    "products": {"product", "name", "unit", "price", "cost", "manufacturer",
+                 "description", "purchase"},
+    "suppliers": {"rating", "order", "purchase", "address", "delivery", "time",
+                  "terms"},
+    "purchase_orders": {"order", "quantity", "amount", "supplier", "vendor",
+                        "status"},
+    "payers": {"amount", "reimbursement", "benefit", "claim", "member",
+               "rejection", "code"},
+}
+
+
+def _singular_token(token: str) -> str:
+    """Fold common English plurals so generic column generics agree."""
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 4 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
+        return token[:-1]
+    return token
+
+
+def _column_tokens(df: pd.DataFrame) -> set[str]:
+    tokens: set[str] = set()
+    for col in df.columns:
+        for tok in _TOKEN_RE.split(str(col).lower()):
+            tok = tok.strip("_")
+            if tok:
+                tokens.add(_singular_token(tok))
+    return tokens
+
+
 def detect_schema_category(df: pd.DataFrame) -> dict[str, float]:
     """
     Detect what type of data the dataframe contains based on column names.
-    Returns a confidence score for each category.
-    """
-    columns = [str(c).lower() for c in df.columns]
 
-    def _keyword_hits(keywords: set) -> int:
-        return sum(1 for kw in keywords if any(kw in col for col in columns))
+    Column headers are tokenized (split on punctuation), normalized (lowercase,
+    English plural folding), and scored against strong-distinctive and weak-
+    generic token sets per category. Returns normalized confidence scores.
+
+    Examples:
+      sale_id/receipt_id/total_amount  -> mostly ``sales``
+      rx_number/days_supply/prescriber -> ``prescriptions``
+    """
+    tokens = _column_tokens(df)
 
     scores = {
-        "sales": _keyword_hits({"sale", "transaction", "receipt", "revenue", "amount",
-                                "payment", "cash", "insurance", "total", "basket",
-                                "pos", "register"}),
-        "inventory": _keyword_hits({"inventory", "stock", "batch", "lot", "expiry",
-                                    "expiration", "quantity", "on_hand", "received",
-                                    "writeoff", "waste", "damage"}),
-        "prescriptions": _keyword_hits({"prescription", "rx", "refill", "days_supply",
-                                        "prescriber", "patient", "ndc", "controlled",
-                                        "schedule"}),
-        "patients": _keyword_hits({"patient", "age", "gender", "chronic", "adherence",
-                                   "loyalty", "first_seen", "last_seen", "demographic"}),
-        "products": _keyword_hits({"product", "drug", "medication", "generic", "brand",
-                                   "form", "strength", "unit", "category",
-                                   "therapeutic", "cost_per_unit", "selling_price",
-                                   "reimbursement", "shelf_life", "storage"}),
-        "suppliers": _keyword_hits({"supplier", "vendor", "purchase", "order", "po",
-                                    "lead_time", "fill_rate", "delivery", "340b",
-                                    "contract"}),
-        "purchase_orders": _keyword_hits({"po", "purchase_order", "order", "vendor",
-                                          "supplier", "delivery", "lead_time",
-                                          "contract"}),
-        "payers": _keyword_hits({"payer", "plan", "claim", "rejection", "paid",
-                                 "billed", "contract_rate", "dir_fee", "copay",
-                                 "coinsurance"}),
+        category: 3 * len(tokens & _STRONG_TOKENS[category])
+        for category in _STRONG_TOKENS
     }
+    for category, weak in _WEAK_TOKENS.items():
+        scores[category] += len(tokens & weak)
 
-    # Bias towards the most specific matches: a keyword that shows up in a column
-    # name is a weak signal, but one that is the full column name is a strong one.
-    for name, keywords in {
-        "sales": {"transaction_ref", "sale_id", "sale_timestamp", "receipt_id",
-                  "pos_id", "total_amount"},
-        "inventory": {"batch_id", "quantity_on_hand", "lot_number", "expiry_date",
-                      "expiration_date"},
-        "prescriptions": {"rx_number", "days_supply", "prescriber_id", "ndc"},
-        "patients": {"patient_id", "patient_hash", "date_of_birth", "adherence_rate"},
-        "products": {"product_id", "ndc", "sku", "raw_name", "selling_price",
-                     "cost_per_unit"},
-        "suppliers": {"supplier_id", "vendor_id", "contract_number"},
-        "purchase_orders": {"po_number", "purchase_order_id", "ordered_quantity"},
-        "payers": {"payer_id", "plan_id", "rejection_code"},
-    }.items():
-        scores[name] += _keyword_hits(keywords)
-
-    # Normalize scores
     total = sum(scores.values())
     if total > 0:
-        scores = {k: v / total for k, v in scores.items()}
-
+        scores = {category: value / total for category, value in scores.items()}
     return scores
-
-
-def infer_primary_keys(df: pd.DataFrame, category: str) -> list[str]:
-    """Infer likely primary key columns based on category and column names."""
-    columns = set(df.columns)
-
-    key_patterns = {
-        "sales": ["transaction_id", "sale_id", "receipt_id", "transaction_ref", "id"],
-        "inventory": ["batch_id", "lot_number", "inventory_id", "id"],
-        "prescriptions": ["rx_number", "prescription_id", "rx_id", "id"],
-        "patients": ["patient_id", "patient_hash", "id"],
-        "products": ["product_id", "ndc", "sku", "id"],
-        "suppliers": ["supplier_id", "vendor_id", "id"],
-        "purchase_orders": ["po_number", "purchase_order_id", "id"],
-        "payers": ["payer_id", "plan_id", "id"],
-    }
-
-    candidates = key_patterns.get(category, ["id"])
-    return [c for c in candidates if c in columns]
-
-
-def validate_required_columns(df: pd.DataFrame, category: str) -> tuple[bool, list[str]]:
-    """Validate that required columns for a category are present."""
-    required = {
-        "sales": ["association_id", "pharmacy_id", "sale_timestamp", "total_amount"],
-        "inventory": ["association_id", "pharmacy_id", "batch_id", "quantity_on_hand"],
-        "prescriptions": ["association_id", "patient_id", "product_id", "rx_number", "days_supply"],
-        "patients": ["association_id", "patient_hash"],
-        "products": ["association_id", "raw_name"],
-        "suppliers": ["association_id", "supplier_name"],
-        "purchase_orders": ["association_id", "supplier_id", "product_id", "ordered_quantity"],
-        "payers": ["association_id", "payer_name"],
-    }
-
-    required_cols = required.get(category, [])
-    missing = [c for c in required_cols if c not in df.columns]
-    return len(missing) == 0, missing
-
-
-def merge_sheets(ingested: IngestedFile, category: str) -> pd.DataFrame:
-    """Merge multiple sheets if they appear to be the same category."""
-    if len(ingested.sheets) <= 1:
-        return ingested.dataframe
-
-    # For now, just return the first sheet
-    # In production, could merge sheets with same schema
-    return ingested.dataframe

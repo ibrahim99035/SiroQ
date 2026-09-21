@@ -130,3 +130,42 @@ def test_two_uploads_to_same_new_name_share_one_application(client):
     two = _upload(client, name="race", filename="b.csv").json()
     assert one["application_id"] == two["application_id"]
     assert two["summary"]["file_count"] == 2
+
+
+def test_multi_sheet_excel_analyzes_each_sheet(client):
+    import io
+
+    import pandas as pd
+
+    buf = io.BytesIO()
+    sales = pd.DataFrame(
+        {"sale_id": [1], "receipt_id": [1], "total_amount": [10.0], "payment_method": ["cash"]}
+    )
+    rx = pd.DataFrame(
+        {"rx_number": [1], "days_supply": [30], "prescriber_id": [9], "ndc": [123]}
+    )
+    with pd.ExcelWriter(buf) as writer:
+        sales.to_excel(writer, sheet_name="Sales", index=False)
+        rx.to_excel(writer, sheet_name="Prescriptions", index=False)
+    buf.seek(0)
+
+    r = client.post(
+        "/api/v1/analyze",
+        headers=api_headers(),
+        data={"application_name": "multi-sheet-app"},
+        files=[("files", ("workbook.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
+    )
+    assert r.status_code == 200, r.text
+    f = r.json()["report"]["files"][0]
+    assert f["multi_sheet"] is True
+    assert f["sheet_count"] == 2
+    assert f["row_count"] == 2
+    assert f["top_category"] is None
+    sheet_cats = {entry["sheet"]: entry["category"] for entry in f["sheet_categories"]}
+    assert sheet_cats["Sales"] == "sales"
+    assert sheet_cats["Prescriptions"] == "prescriptions"
+    summary = r.json()["summary"]
+    assert summary["categories_detected"]["sales"] == ["workbook.xlsx[Sales]"]
+    assert summary["categories_detected"]["prescriptions"] == ["workbook.xlsx[Prescriptions]"]
+    assert summary["data_quality_score"] == 100.0
+    assert summary["findings_count"] == 0
