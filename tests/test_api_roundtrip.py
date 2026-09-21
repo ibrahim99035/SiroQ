@@ -106,3 +106,27 @@ def test_upload_to_existing_application(client):
 def test_application_not_found(client):
     r = client.get("/api/v1/applications/does-not-exist", headers=api_headers())
     assert r.status_code == 404
+
+
+def test_create_application_is_idempotent_by_name(client):
+    first = client.post(
+        "/api/v1/applications",
+        headers=api_headers(),
+        json={"name": "dup-name", "metadata": {"a": 1}},
+    )
+    assert first.status_code == 201
+    second = client.post(
+        "/api/v1/applications",
+        headers=api_headers(),
+        json={"name": "dup-name", "metadata": {"b": 2}},
+    )
+    assert second.status_code == 201
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["metadata"] == {"b": 2}
+
+
+def test_two_uploads_to_same_new_name_share_one_application(client):
+    one = _upload(client, name="race", filename="a.csv").json()
+    two = _upload(client, name="race", filename="b.csv").json()
+    assert one["application_id"] == two["application_id"]
+    assert two["summary"]["file_count"] == 2

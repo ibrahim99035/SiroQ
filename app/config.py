@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     API_KEY: str = Field(default=DEV_API_KEY)
     STORAGE_PATH: str = Field(default="./data/storage")
     ENVIRONMENT: str = Field(default="development")
+    LOG_LEVEL: str = Field(default="INFO")
     # Upload guard rails.
     MAX_FILES_PER_REQUEST: int = Field(default=25)
     MAX_FILE_BYTES: int = Field(default=50 * 1024 * 1024)

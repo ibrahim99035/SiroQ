@@ -110,6 +110,28 @@ def _application_or_404(db: Session, application_id: str) -> Application:
     return app_obj
 
 
+def _get_or_create_application(db: Session, name: str) -> Application:
+    """Fetch an application by name, creating it if absent.
+
+    Uses the unique index on ``applications.name`` to stay idempotent under
+    concurrent requests: if an identical row wins the insert race, we roll
+    back and reuse it instead of failing.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    app_obj = db.query(Application).filter(Application.name == name).first()
+    if app_obj is not None:
+        return app_obj
+    app_obj = Application(name=name)
+    db.add(app_obj)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        app_obj = db.query(Application).filter(Application.name == name).one()
+    return app_obj
+
+
 # --- one-shot: an application + its files in a single request ------------
 
 
@@ -123,13 +145,7 @@ def analyze_application_one_shot(
     if application_name.strip() == "":
         raise HTTPException(status_code=400, detail="application_name is required")
 
-    app_obj = (
-        db.query(Application).filter(Application.name == application_name.strip()).first()
-    )
-    if app_obj is None:
-        app_obj = Application(name=application_name.strip())
-        db.add(app_obj)
-        db.flush()
+    app_obj = _get_or_create_application(db, application_name.strip())
 
     _persist_files(db, app_obj.id, uploads)
     analysis = _run_and_store_analysis(db, app_obj)
@@ -141,8 +157,8 @@ def analyze_application_one_shot(
 
 @router.post("/applications", status_code=201, summary="Create an empty application")
 def create_application(body: NewApplication, db: Session = Depends(get_db)):
-    app_obj = Application(name=body.name.strip(), metadata_json=body.metadata or {})
-    db.add(app_obj)
+    app_obj = _get_or_create_application(db, body.name.strip())
+    app_obj.metadata_json = body.metadata or app_obj.metadata_json
     db.commit()
     db.refresh(app_obj)
     return {

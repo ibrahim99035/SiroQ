@@ -33,6 +33,7 @@ services:
       API_KEY: dev_api_key_change_in_production
       STORAGE_PATH: /data/storage
       ENVIRONMENT: development
+      LOG_LEVEL: INFO
     ports:
       - "8000:8000"
     volumes:
