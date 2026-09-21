@@ -169,6 +169,29 @@ th { background: var(--bg); font-weight: 600; }
 }
 .muted { color: var(--mut); }
 
+/* api key modal */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(15, 23, 42, .55);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 14vh 16px 16px; z-index: 50;
+}
+.modal {
+  background: var(--panel); border-radius: 12px; width: min(420px, 100%);
+  padding: 20px 22px; box-shadow: 0 18px 50px rgba(15, 23, 42, .35);
+}
+.modal h3 { margin: 0 0 8px; }
+.modal-note { color: var(--mut); font-size: 13px; margin: 0 0 14px; }
+.modal input {
+  width: 100%; font: inherit; padding: 9px 11px; border: 1px solid var(--line);
+  border-radius: 8px; outline: none;
+}
+.modal input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.modal input.bad { border-color: var(--bad); }
+.key-msg { color: var(--bad); font-size: 12.5px; margin-top: 8px; min-height: 16px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.modal .btn { color: var(--ink); border-color: var(--line); background: var(--panel); }
+.modal .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }
   .sidebar { max-height: 300px; }

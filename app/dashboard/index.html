@@ -20,6 +20,22 @@
   </div>
 </header>
 
+<div id="keyModal" class="modal-backdrop" hidden>
+  <div class="modal">
+    <h3>API key required</h3>
+    <p class="modal-note">
+      Enter the SiroQ API key (<code>X-API-Key</code>) to load your applications.
+      It is stored in this browser only.
+    </p>
+    <input id="keyInput" type="password" placeholder="API key" autocomplete="off" spellcheck="false">
+    <div id="keyMsg" class="key-msg"></div>
+    <div class="modal-actions">
+      <button id="keySaveBtn" class="btn primary">Save key</button>
+      <button id="keyCancelBtn" class="btn ghost">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <main class="layout">
   <aside class="sidebar">
     <div class="side-label">Applications</div>

@@ -26,23 +26,47 @@
     opts = opts || {};
     opts.headers = Object.assign({ "X-API-Key": getKey() }, opts.headers || {});
     const res = await fetch(path, opts);
-    if (res.status === 401) { askForKey(); throw new Error("API key rejected"); }
+    if (res.status === 401) { openKeyModal("API key rejected — please enter a valid key."); throw new Error("API key rejected"); }
     if (!res.ok) throw new Error("HTTP " + res.status + " on " + path);
     return res.json();
   }
 
-  function askForKey() {
-    const key = prompt(
-      "Enter the SiroQ API key (X-API-Key) — it is stored in this browser only:",
-      getKey()
-    );
-    if (key) { setKey(key); boot(); }
+  /* ---------- api key input (modal, not a native prompt) ---------- */
+
+  function openKeyModal(msg) {
+    const modal = $("keyModal");
+    const input = $("keyInput");
+    input.value = getKey();
+    $("keyMsg").textContent = msg || "";
+    input.classList.toggle("bad", !!msg);
+    modal.hidden = false;
+    input.focus();
+  }
+
+  function closeKeyModal() {
+    $("keyModal").hidden = true;
+  }
+
+  function saveKey() {
+    const k = $("keyInput").value.trim();
+    if (!k) { $("keyMsg").textContent = "A key is required."; return; }
+    setKey(k);
+    closeKeyModal();
+    boot();
+  }
+
+  function showNoKey() {
+    $("emptyBanner").innerHTML =
+      '<div class="empty">Add your SiroQ API key to load applications. ' +
+      '<button class="btn primary" id="openKeyAgain">Add API key</button></div>';
+    const btn = $("openKeyAgain");
+    if (btn) btn.addEventListener("click", function () { openKeyModal(); });
   }
 
   /* ---------- navigation ---------- */
 
   async function boot() {
-    if (!getKey()) { askForKey(); return; }
+    if (!getKey()) { showNoKey(); openKeyModal(); return; }
     try {
       const data = await api("/api/v1/applications");
       state.apps = data.applications || [];
@@ -504,7 +528,7 @@
   /* ---------- misc ---------- */
 
   function fail(e) {
-    if (String(e.message).includes("401")) { askForKey(); return; }
+    if (String(e.message).includes("401")) { openKeyModal(); return; }
     const box = $("emptyBanner");
     box.innerHTML = '<div class="empty">Error: ' + esc(e.message) + "</div>";
   }
@@ -522,9 +546,12 @@
     boot();
     window.addEventListener("resize", onResize);
     $("reloadBtn").addEventListener("click", boot);
-    $("keyBtn").addEventListener("click", function () {
-      const k = prompt("SiroQ API key (X-API-Key):", getKey());
-      if (k) { setKey(k); boot(); }
+    $("keyBtn").addEventListener("click", function () { openKeyModal(); });
+    $("keySaveBtn").addEventListener("click", saveKey);
+    $("keyCancelBtn").addEventListener("click", closeKeyModal);
+    $("keyInput").addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") saveKey();
+      if (ev.key === "Escape") closeKeyModal();
     });
   });
 })();
