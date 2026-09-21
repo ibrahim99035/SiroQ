@@ -37,14 +37,14 @@ def _sum(df: pd.DataFrame, col: str) -> float:
 
 
 def sales_analytics(df: pd.DataFrame, fmap: dict) -> dict[str, Any]:
-    amount_col = _pick(df, fmap, "total_amount", "total_amount", "total", "amount", "revenue")
+    amount_col = _pick(df, fmap, "total_amount", "total_amount", "total", "amount", "revenue", "total_revenue")
     ts_col = _pick(df, fmap, "sale_timestamp", "sale_timestamp", "sale_date", "transaction_date", "datetime")
     tx_col = _pick(df, fmap, "transaction_ref", "transaction_ref", "transaction_id", "receipt_id", "invoice_no", "sale_id")
     pay_col = _pick(df, fmap, "payment_method", "payment_method", "payment_type", "payment")
-    qty_col = _pick(df, fmap, "quantity", "quantity", "qty", "qty_sold")
-    price_col = _pick(df, fmap, "unit_price", "unit_price", "price", "unit_cost")
+    qty_col = _pick(df, fmap, "quantity", "quantity", "qty", "qty_sold", "quantity_sold")
+    price_col = _pick(df, fmap, "unit_price", "unit_price", "price", "unit_cost", "selling_price")
     prod_col = _pick(df, fmap, "product_name", "product_name", "product", "item", "drug")
-    cost_col = _pick(df, fmap, "cost_per_unit", "unit_cost", "product_cost", "cost")
+    cost_col = _pick(df, fmap, "cost_per_unit", "unit_cost", "product_cost", "cost", "total_cost")
 
     skipped = []
     if not amount_col:
