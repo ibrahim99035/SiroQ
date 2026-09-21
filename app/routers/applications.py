@@ -155,6 +155,53 @@ def analyze_application_one_shot(
 # --- applications --------------------------------------------------------
 
 
+@router.get("/applications", summary="List applications with their latest analysis")
+def list_applications(db: Session = Depends(get_db)):
+    apps = db.query(Application).order_by(Application.created_at.desc()).all()
+    out = []
+    for app_obj in apps:
+        latest = (
+            db.query(Analysis)
+            .filter(Analysis.application_id == app_obj.id)
+            .order_by(Analysis.created_at.desc())
+            .first()
+        )
+        file_count = (
+            db.query(StoredFile)
+            .filter(StoredFile.application_id == app_obj.id)
+            .count()
+        )
+        analysis_count = (
+            db.query(Analysis)
+            .filter(Analysis.application_id == app_obj.id)
+            .count()
+        )
+        out.append({
+            "id": app_obj.id,
+            "name": app_obj.name,
+            "metadata": app_obj.metadata_json,
+            "created_at": app_obj.created_at.isoformat() if app_obj.created_at else None,
+            "file_count": file_count,
+            "analysis_count": analysis_count,
+            "latest_analysis": (
+                {
+                    "id": latest.id,
+                    "status": latest.status,
+                    "created_at": latest.created_at.isoformat()
+                    if latest.created_at
+                    else None,
+                    "completed_at": latest.completed_at.isoformat()
+                    if latest.completed_at
+                    else None,
+                    "summary": latest.summary,
+                }
+                if latest is not None
+                else None
+            ),
+        })
+    return {"applications": out}
+
+
 @router.post("/applications", status_code=201, summary="Create an empty application")
 def create_application(body: NewApplication, db: Session = Depends(get_db)):
     app_obj = _get_or_create_application(db, body.name.strip())

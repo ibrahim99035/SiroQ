@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SiroQ analysis report — {{ model.application_name }}</title>
+<style>
+  :root { --ink:#1a2233; --mut:#6b7789; --line:#e2e8f0; --accent:#2563eb;
+          --ok:#16a34a; --warn:#d97706; --bad:#dc2626; --bg:#f8fafc; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         color:var(--ink); background:#eef1f5; }
+  .sheet { max-width:1080px; margin:24px auto; background:#fff; border:1px solid var(--line);
+           border-radius:10px; padding:34px 42px; box-shadow:0 1px 3px rgba(20,30,60,.08); }
+  header.report { border-bottom:3px solid var(--accent); padding-bottom:16px; margin-bottom:22px; }
+  header.report h1 { margin:0 0 4px; font-size:26px; }
+  header.report .meta { color:var(--mut); font-size:13px; }
+  .nav { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px; }
+  .nav a, .nav button { font:inherit; border:1px solid var(--line); background:#fff; color:var(--accent);
+          text-decoration:none; padding:6px 12px; border-radius:8px; cursor:pointer; }
+  .nav a:hover, .nav button:hover { background:#eff6ff; }
+  h2.section { font-size:16px; margin:30px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--line);
+               color:var(--accent); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .kpi { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .kpi .name { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--mut); }
+  .kpi .value { font-size:19px; font-weight:700; margin-top:2px; }
+  .kpi .score-bad { color:var(--bad); } .kpi .score-warn { color:var(--warn); }
+  .kpi .score-good { color:var(--ok); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:14px 16px; background:#fff; }
+  .card h3 { margin:0 0 8px; font-size:14px; }
+  .card h3 .tag { float:right; font-size:11px; font-weight:600; }
+  .tag { display:inline-block; border-radius:999px; padding:2px 8px; font-size:11px; }
+  .tag.sales { background:#dbeafe; color:#1d4ed8; }
+  .tag.inventory { background:#dcfce7; color:#15803d; }
+  .tag.products { background:#ede9fe; color:#6d28d9; }
+  .tag.purchase_orders { background:#fef3c7; color:#b45309; }
+  .tag.patients, .tag.prescriptions, .tag.payers, .tag.suppliers { background:#fce7f3; color:#be185d; }
+  ul.notes { margin:8px 0; padding-left:18px; color:var(--mut); }
+  .bar-row { display:grid; grid-template-columns:190px 1fr 70px; gap:10px; align-items:center;
+             margin:5px 0; font-size:13px; }
+  .bar-track { background:var(--bg); border:1px solid var(--line); border-radius:999px; height:16px; overflow:hidden; }
+  .bar-fill { display:block; height:100%; border-radius:999px; background:linear-gradient(90deg,#3b82f6,#2563eb); }
+  .bar-val { text-align:right; font-variant-numeric:tabular-nums; color:var(--mut); }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border:1px solid var(--line); vertical-align:top; }
+  th { background:var(--bg); font-weight:600; white-space:nowrap; }
+  tr:nth-child(even) td { background:#fbfcfe; }
+  .pill { display:inline-block; border-radius:999px; padding:1px 8px; font-size:11px; font-weight:600; }
+  .pill.ok { background:#dcfce7; color:#15803d; } .pill.pass { background:#dcfce7; color:#15803d; }
+  .pill.warn { background:#fef3c7; color:#b45309; } .pill.fail { background:#fee2e2; color:#b91c1c; }
+  .muted { color:var(--mut); }
+  .file-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
+  .file-head h3 { margin:0; font-size:15px; }
+  .findings li { margin:3px 0; }
+  @media print {
+    body { background:#fff; }
+    .sheet { box-shadow:none; border:none; margin:0; max-width:none; padding:0; }
+    .nav { display:none; }
+    h2.section { break-after:avoid; }
+    .card, table { break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header class="report">
+    <h1>SiroQ analysis report — {{ model.application_name }}</h1>
+    <div class="meta">
+      application {{ model.application_id }} · analysis {{ analysis.id }} ·
+      {% if analysis.completed_at %}completed {{ analysis.completed_at }}{% endif %} ·
+      analyzed at {{ model.analyzed_at }} · engine {{ model.engine_version }}
+    </div>
+    <div class="meta">status: {{ analysis.status }} {% if analysis.created_at %}· created {{ analysis.created_at }}{% endif %}</div>
+  </header>
+
+  <div class="nav">
+    <button onclick="window.print()">Print / save as PDF</button>
+    <span class="muted" style="align-self:center">JSON export is available from the dashboard.</span>
+  </div>
+
+  {% if model.summary %}
+  <h2 class="section">Summary</h2>
+  <div class="kpis">
+    <div class="kpi"><div class="name">Files</div><div class="value">{{ model.summary.file_count }}</div></div>
+    <div class="kpi"><div class="name">Total rows</div><div class="value">{{ model.summary.total_rows }}</div></div>
+    <div class="kpi"><div class="name">Data quality</div>
+      <div class="value
+        {% if model.summary.quality_score is number and model.summary.quality_score >= 90 %}score-good
+        {% elif model.summary.quality_score is number and model.summary.quality_score >= 70 %}score-warn
+        {% else %}score-bad{% endif %}">{{ model.summary.quality_score }}{% if model.summary.quality_score is not none %} / 100{% endif %}</div></div>
+    <div class="kpi"><div class="name">Findings</div><div class="value">{{ model.summary.findings_count }}</div></div>
+  </div>
+  {% if model.summary.categories_detected %}
+  <div class="card">
+    <h3>Categories detected</h3>
+      {% for category, labels in model.summary.categories_detected.items() %}
+      <div class="bar-row">
+        <span><span class="tag {{ category }}">{{ category }}</span> <span class="muted">({{ labels | length }} file{% if labels | length != 1 %}s{% endif %})</span></span>
+        <span class="muted" style="grid-column:span 2">{{ labels | join(', ') }}</span>
+      </div>
+      {% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% for f in model.files %}
+  <h2 class="section">File {{ loop.index }} — {{ f.filename }}</h2>
+  <div class="card">
+    <div class="file-head">
+      <h3><span class="tag {{ f.top_category or '' }}">{{ f.top_category or 'uncategorized' }}</span>
+          {% if f.top_category %}top category{% endif %}</h3>
+      <span class="muted">{{ f.file_type }} · {{ "{:,}".format(f.size_bytes) }} bytes · sha256 {{ (f.sha256 or '')[:16] }}…</span>
+    </div>
+    <p class="muted" style="margin:6px 0 0">
+      {{ "{:,}".format(f.row_count) }} rows · {{ f.column_count }} columns{% if f.multi_sheet %} · multi-sheet{% endif %}
+    </p>
+    {% if f.notes %}
+    <ul class="notes">{% for n in f.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if f.errors %}
+    <p style="color:var(--bad)">{% for e in f.errors %}{{ e }} {% endfor %}</p>
+    {% endif %}
+
+    {% if f.rows and f.rows | length > 1 %}
+    <table>
+      <tr><th>Sheet</th><th>Rows</th><th>Top category</th></tr>
+      {% for s in f.rows %}
+      <tr><td>{{ s.sheet or '—' }}</td><td>{{ "{:,}".format(s.rows) }}</td>
+          <td><span class="tag {{ s.top_category or '' }}">{{ s.top_category or '—' }}</span></td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  </div>
+
+  {% if f.category_bars %}
+  <div class="card">
+    <h3>Category probability</h3>
+    {% for b in f.category_bars %}
+    <div class="bar-row">
+      <span>{{ b.label }}</span>
+      <div class="bar-track"><span class="bar-fill" style="width:{{ b.pct }}%"></span></div>
+      <span class="bar-val">{{ b.value }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="cards">
+    <div class="card">
+      <h3>Data quality — {% if f.quality_score is number %}{{ f.quality_score }}{% else %}<span class="muted">n/a</span>{% endif %}{% if f.quality_score is number %} / 100{% endif %}
+        {% if f.duplicate_count %}<span class="muted">({{ f.duplicate_count }} duplicate rows)</span>{% endif %}
+      </h3>
+      {% if f.checks %}
+      <table>
+        <tr><th>Check</th><th>Status</th></tr>
+        {% for c in f.checks %}
+        <tr><td>{{ c.check }}</td><td><span class="pill {{ c.status }}">{{ c.status }}</span></td></tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+    </div>
+
+    {% if f.domain and (f.domain.kpis or f.domain.bars or f.domain.tables or f.domain.skipped) %}
+    <div class="card">
+      <h3>Domain analytics{% if f.domain.skipped %}
+        <span class="tag">skipped: {{ f.domain.skipped | join(', ') }}</span>{% endif %}</h3>
+      {% if f.domain.kpis %}
+      <div class="kpis">
+        {% for k in f.domain.kpis %}
+        <div class="kpi"><div class="name">{{ k.label }}</div><div class="value">{{ k.value }}</div></div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% for b in f.domain.bars %}
+      <h4 style="margin:12px 0 4px">{{ b.title }}</h4>
+      {% for bb in b.bars %}
+      <div class="bar-row">
+        <span title="{{ bb.label }}">{{ bb.label | truncate(34, True) }}</span>
+        <div class="bar-track"><span class="bar-fill" style="width:{{ bb.pct }}%"></span></div>
+        <span class="bar-val">{{ bb.value }}</span>
+      </div>
+      {% endfor %}
+      {% endfor %}
+      {% for t in f.domain.tables %}
+      <h4 style="margin:12px 0 4px">{{ t.title }}</h4>
+      <table>
+        <tr>{% for h in t.headers %}<th>{{ h }}</th>{% endfor %}</tr>
+        {% for row in t.rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+      </table>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+  {% if f.findings %}
+  <div class="card">
+    <h3>Quality findings</h3>
+    <ul class="findings">{% for x in f.findings %}<li>{{ x }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h3>Column profile</h3>
+    {% if f.profile_rows %}
+    <table>
+      <tr><th>Column</th><th>dtype</th><th>kind</th><th>null %</th><th>unique %</th><th>Stats</th><th>Top values</th></tr>
+      {% for r in f.profile_rows %}
+      <tr>
+        <td>{{ r.name }}</td><td>{{ r.dtype }}</td><td>{{ r.kind }}</td>
+        <td>{{ r.null_pct }}</td><td>{{ r.unique_pct }}</td>
+        <td>{{ r.stats }}</td><td class="muted">{{ r.top_values }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="muted">No columns profiled.</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <footer class="muted" style="margin-top:30px;font-size:12px;border-top:1px solid var(--line);padding-top:12px">
+    Generated by SiroQ Analysis Service engine {{ model.engine_version }} · {{ model.analyzed_at }}
+  </footer>
+</div>
+</body>
+</html>

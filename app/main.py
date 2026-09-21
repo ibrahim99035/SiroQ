@@ -3,8 +3,11 @@ files in one request, deep-analyzes them, persists the results, and serves them
 back on request to other services.
 """
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, Response, status
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from app.config import settings
@@ -15,6 +18,8 @@ logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+
+DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
 
 app = FastAPI(
     title="SiroQ Analysis Service",
@@ -28,6 +33,19 @@ app = FastAPI(
 
 app.include_router(applications.router)
 app.include_router(analyses.router)
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/dashboard/", status_code=307)
+
+
+if DASHBOARD_DIR.is_dir():
+    app.mount(
+        "/dashboard",
+        StaticFiles(directory=str(DASHBOARD_DIR), html=True),
+        name="dashboard",
+    )
 
 
 @app.get("/health", tags=["health"], include_in_schema=False)
