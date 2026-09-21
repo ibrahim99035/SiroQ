@@ -1,55 +1,38 @@
-"""Shared pytest fixtures for SiroQ.
-
-Tests run inside the app container (``docker compose exec app pytest -v``)
-where ``DATABASE_URL`` points at the least-privilege ``siroq_app`` role and the
-schema has already been migrated/seeded via ``make migrate`` / ``make seed``.
-"""
-import sys
-from pathlib import Path
 import pytest
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.analytics_service.storage import delete_tree
+from app.config import settings
+from app.database import Base, SessionLocal, engine
+from app.main import app
 
-from scripts.seed import idempotent_create
+# Schema setup (create/truncate) needs the migration-owner role; the running
+# app connects as the least-privilege role which the API itself uses.
+migration_engine = create_engine(settings.MIGRATIONS_DATABASE_URL)
 
 
-@pytest.fixture(scope="session")
-def seeded_db():
-    idempotent_create()
-    return True
+def api_headers() -> dict:
+    return {"X-API-Key": settings.API_KEY}
 
 
-@pytest.fixture(scope="session")
-def client(seeded_db):
-    from app.main import app
+@pytest.fixture(scope="session", autouse=True)
+def _schema():
+    Base.metadata.create_all(bind=migration_engine)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _clean_state(_schema):
+    """Isolate every test: empty the storage root and the three tables."""
+    delete_tree()
+    with migration_engine.connect() as conn:
+        conn.execute(text("TRUNCATE analyses, files, applications CASCADE"))
+        conn.commit()
+    yield
+
+
+@pytest.fixture()
+def client():
     with TestClient(app) as c:
         yield c
-
-
-def login(client, email, password="ChangeMe123!"):
-    return client.post(
-        "/login", data={"email": email, "password": password},
-        follow_redirects=False,
-    )
-
-
-@pytest.fixture
-def admin_session(client):
-    login(client, "admin@siroq.local")
-    yield client
-    client.post("/logout")
-
-
-@pytest.fixture
-def viewer_session(client):
-    login(client, "viewer@siroq.local")
-    yield client
-    client.post("/logout")
-
-
-@pytest.fixture
-def datasteward_session(client):
-    login(client, "steward@siroq.local")
-    yield client
-    client.post("/logout")
