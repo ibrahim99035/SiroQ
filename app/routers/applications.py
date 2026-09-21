@@ -58,8 +58,13 @@ def _persist_files(session: Session, app_id: str, uploads: list[tuple[str, bytes
             file_type=file_type,
         )
         session.add(stored)
+        # Flush per row: bulk (insertmanyvalues) inserts cannot match the
+        # sentinel values psycopg returns when both the Uuid pk and the
+        # server_default created_at require RETURNING. One insert per flush
+        # keeps the round-trips exact.
+        session.flush()
         saved.append(stored)
-    session.flush()
+    session.commit()
     return saved
 
 

@@ -181,10 +181,8 @@
 
   function renderSummary(s, r) {
     const box = $("summaryBox");
-    const cats = s.categories_detected || {};
-    const catItems = Object.keys(cats).map(function (k) {
-      return { label: k, value: (cats[k] || []).length };
-    }).sort(function (a, b) { return b.value - a.value; });
+    const cats = Array.isArray(s.categories_detected) ? s.categories_detected : [];
+    const catItems = cats.map(function (k) { return { label: k, value: 1 }; });
     const html =
       kpi("Files", s.file_count) +
       kpi("Total rows", fmtRows(s.total_rows)) +
@@ -193,7 +191,7 @@
     box.innerHTML = html;
     const catBox = $("categoryBox");
     catBox.innerHTML = "";
-    if (catItems.length) C.donut(catBox, catItems, { center: catItems.reduce(function (a, b) { return a + b.value; }, 0), centerLabel: "categories" });
+    if (catItems.length) C.donut(catBox, catItems, { center: catItems.length, centerLabel: "categories" });
     else catBox.innerHTML = '<span class="muted">no categories detected</span>';
   }
 
@@ -293,7 +291,10 @@
     const cbox = d.querySelector(".chart");
     const extra = d.querySelector(".chart-extra");
     if (kind === "barrel") {
-      C.hBar(cbox, data ? Object.keys(data).map(function (k) { return { label: k, value: data[k] }; }).sort(function (a, b) { return b.value - a.value; }) : []);
+      C.hBar(cbox, data ? Object.keys(data).map(function (k) {
+        const v = Number(data[k]) || 0;
+        return { label: k, value: v, pct: Math.max(0, Math.min(100, v * 100)) };
+      }).sort(function (a, b) { return b.value - a.value; }) : []);
     } else if (kind === "quality") {
       const dq = (f.data_quality || {});
       C.gauge(cbox, dq.score);
@@ -318,7 +319,7 @@
 
   function domainData(f) {
     const da = f.domain_analytics || {};
-    const out = { kpis: [], bars: [], donuts: [], lines: [], tables: [], notes: [] };
+    const out = { kpis: [], bars: [], donuts: [], lines: [], vbars: [], tables: [], notes: [] };
     if (typeof da !== "object" || da === null) return out;
     const consumed = new Set(["skipped", "category"]);
     if (Array.isArray(da.skipped)) out.notes.push("skipped: " + da.skipped.join(", "));

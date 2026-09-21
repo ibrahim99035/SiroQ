@@ -21,6 +21,27 @@ def _upload(client, name="pharmacy-a", csv=CLEAN_SALES_CSV, filename="sales.csv"
     )
 
 
+def test_one_shot_upload_accepts_multiple_files(client):
+    r = client.post(
+        "/api/v1/analyze",
+        headers=api_headers(),
+        data={"application_name": "multi"},
+        files=[
+            ("files", ("a.csv", BytesIO(CLEAN_SALES_CSV.encode()), "text/csv")),
+            ("files", ("b.csv", BytesIO(CLEAN_SALES_CSV.encode()), "text/csv")),
+        ],
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["summary"]["file_count"] == 2
+    apps = client.get("/api/v1/applications", headers=api_headers()).json()["applications"]
+    detail = client.get(
+        f"/api/v1/applications/{apps[0]['id']}", headers=api_headers()
+    ).json()
+    assert len(detail["files"]) == 2
+    assert {f["original_filename"] for f in detail["files"]} == {"a.csv", "b.csv"}
+
+
 def test_one_shot_upload_analyzes_and_persists(client):
     r = _upload(client)
     assert r.status_code == 200, r.text
