@@ -1,4 +1,0 @@
-product_name,sale_timestamp,quantity,unit_price,total_amount,payment_method
-Paracetamol,2026-09-01,2,1.50,3.00,card
-Ibuprofen,2026-09-01,1,2.00,2.00,cash
-Amoxicillin,2026-09-02,5,1.00,5.00,card

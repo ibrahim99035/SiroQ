@@ -1,37 +1,37 @@
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEV_SECRET_KEY = "dev_secret_key_change_in_production"
+DEV_API_KEY = "dev_api_key_change_in_production"
 
 
 class Settings(BaseSettings):
+    """Configuration for the SiroQ analysis service.
+
+    The application connects to Postgres as a separate, least-privileged role
+    (``siroq_app``); migrations run as the owning role (``siroq``).
+    """
+
     model_config = SettingsConfigDict(env_file=".env", env_prefix="")
 
     DATABASE_URL: str = Field(
-        default="postgresql+psycopg://siroq_app:siroq_app_dev_password@localhost:5432/siroq"
+        default="postgresql+psycopg://siroq_app:siroq_app_dev_password@localhost:5433/siroq"
     )
     MIGRATIONS_DATABASE_URL: str = Field(
-        default="postgresql+psycopg://siroq:siroq_dev_password@localhost:5432/siroq"
+        default="postgresql+psycopg://siroq:siroq_dev_password@localhost:5433/siroq"
     )
-    SECRET_KEY: str = Field(default=DEV_SECRET_KEY)
-    BRONZE_STORAGE_PATH: str = Field(default="./data/bronze")
+    API_KEY: str = Field(default=DEV_API_KEY)
+    STORAGE_PATH: str = Field(default="./data/storage")
     ENVIRONMENT: str = Field(default="development")
-    # Upload guard rails: refuse an oversized file rather than buffering it, and
-    # cap how far a zip can expand so a zip bomb cannot exhaust memory or disk.
-    MAX_UPLOAD_BYTES: int = Field(default=50 * 1024 * 1024)
-    MAX_ZIP_UNCOMPRESSED_BYTES: int = Field(default=200 * 1024 * 1024)
-
-    def zip_cap(self) -> int:
-        """Maximum decompressed size allowed for a single zip upload."""
-        return int(self.MAX_ZIP_UNCOMPRESSED_BYTES)
+    # Upload guard rails.
+    MAX_FILES_PER_REQUEST: int = Field(default=25)
+    MAX_FILE_BYTES: int = Field(default=50 * 1024 * 1024)
 
     @model_validator(mode="after")
-    def _require_real_secret_outside_dev(self):
-        """Refuse to start in a non-development environment with the shipped
-        placeholder signing key, which would make session cookies forgeable."""
-        if self.ENVIRONMENT != "development" and self.SECRET_KEY == DEV_SECRET_KEY:
+    def _require_real_api_key_outside_dev(self):
+        """Refuse to boot outside development with the shipped placeholder key."""
+        if self.ENVIRONMENT != "development" and self.API_KEY == DEV_API_KEY:
             raise ValueError(
-                "SECRET_KEY must be changed from the development default when "
+                "API_KEY must be changed from the development default when "
                 f"ENVIRONMENT={self.ENVIRONMENT!r}"
             )
         return self

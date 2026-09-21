@@ -1,14 +1,16 @@
-from passlib.context import CryptContext
+"""Service-to-service authentication: a single shared static API key.
 
-pwd_context = CryptContext(
-    schemes=["pbkdf2_sha256"],
-    deprecated="auto",
-)
+Deny-by-default: any request without a matching ``X-API-Key`` is rejected with
+401 — there is no pass-through branch.
+"""
+import hmac
+
+from fastapi import HTTPException, Request
+
+from app.config import settings
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-def hash_password(plain_password: str) -> str:
-    return pwd_context.hash(plain_password)
+def require_api_key(request: Request) -> None:
+    key = request.headers.get("X-API-Key", "")
+    if not key or not hmac.compare_digest(key, settings.API_KEY):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")

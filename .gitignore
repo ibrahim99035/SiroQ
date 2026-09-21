@@ -183,3 +183,4 @@ data/
 # Generated OpenAPI dump (regenerate from app.openapi())
 swagger.json
 
+.code-graph/

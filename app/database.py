@@ -1,26 +1,16 @@
+from collections.abc import Iterator
+
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import Session, sessionmaker, declarative_base
 
 from app.config import settings
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    pool_pre_ping=True,
-    future=True,
-)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
+engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 Base = declarative_base()
 
 
-def get_session():
-    """Dependency to get a SQLAlchemy session per request.
-
-    Yield-style so the session is always closed when the request ends, even on
-    an exception. Previously the bare session was returned and never closed,
-    leaking a connection from the pool on every request.
-    """
+def get_db() -> Iterator[Session]:
     db = SessionLocal()
     try:
         yield db

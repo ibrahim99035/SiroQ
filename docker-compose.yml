@@ -30,15 +30,14 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://siroq_app:siroq_app_dev_password@db:5432/siroq
       MIGRATIONS_DATABASE_URL: postgresql+psycopg://siroq:siroq_dev_password@db:5432/siroq
-      SECRET_KEY: dev_secret_key_change_in_production
-      BRONZE_STORAGE_PATH: /data/bronze
+      API_KEY: dev_api_key_change_in_production
+      STORAGE_PATH: /data/storage
       ENVIRONMENT: development
     ports:
       - "8000:8000"
     volumes:
       - ./app:/code/app
-      - ./data/bronze:/data/bronze
-      - ./tests:/code/tests
+      - ./data/storage:/data/storage
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:

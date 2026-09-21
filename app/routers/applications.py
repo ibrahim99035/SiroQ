@@ -1,516 +1,217 @@
-"""Applications + Data Explorer routes.
-
-Prefix: /applications (wired in app/main.py). The dataset confirm route is also
-exposed as a dedicated top-level ``datasets_router`` so the browser can post to
-``/datasets/{id}/confirm``.
-"""
-import hashlib
-import os
+"""Application and analysis endpoints for the SiroQ analysis service."""
 import uuid
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Request, Depends, UploadFile, File, Form
-from fastapi.responses import RedirectResponse, HTMLResponse
-from fastapi.templating import Jinja2Templates
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.database import get_session
-from app.dependencies import require_role
-from app.models.models import (
-    Users, Applications, Pharmacies, Associations, Datasets,
-    MappingProfiles, Sales, SaleLines, EditAuditLog,
-)
-from app.services import ingestion, mapping as mapping_service, audit as audit_service
-from app.services.classification import classify_file, classify_excel_sheets, classify_zip
+from app.analytics_service import ingestion, pipeline, storage
+from app.config import settings
+from app.database import get_db
+from app.models.service_models import Analysis, Application, StoredFile
+from app.security import require_api_key
 
-router = APIRouter(tags=["applications"])
-datasets_router = APIRouter(tags=["datasets"])
-templates = Jinja2Templates(directory="app/templates")
-
-INGEST_ROLES = ("association_admin", "pharmacy_manager", "data_steward")
-EDIT_ROLES = ("association_admin", "pharmacy_manager", "data_steward")
+router = APIRouter(prefix="/api/v1", tags=["applications"], dependencies=[Depends(require_api_key)])
 
 
-# ---------------------------------------------------------------- list / new
-@router.get("")
-def applications_list(request: Request, db: Session = Depends(get_session),
-                      user: Users = Depends(require_role(*INGEST_ROLES))):
-    apps = db.query(Applications).filter(
-        Applications.association_id == user.association_id
-    ).order_by(Applications.created_at).all()
-    return templates.TemplateResponse(
-        request, "applications/list.html", {"request": request, "user": user, "apps": apps}
-    )
+class NewApplication(BaseModel):
+    name: str
+    metadata: dict = Field(default_factory=dict)
 
 
-@router.get("/new")
-def application_new(request: Request, db: Session = Depends(get_session),
-                    user: Users = Depends(require_role(*INGEST_ROLES))):
-    pharmacies = db.query(Pharmacies).filter(
-        Pharmacies.association_id == user.association_id
-    ).all()
-    return templates.TemplateResponse(
-        request, "applications/new.html", {"request": request, "user": user,
-                                  "pharmacies": pharmacies}
-    )
-
-
-@router.post("/new")
-def application_create(request: Request, db: Session = Depends(get_session),
-                       user: Users = Depends(require_role(*INGEST_ROLES)),
-                       name: str = Form(...),
-                       pharmacy_id: str | None = Form(None),
-                       source_type: str = Form("manual_upload")):
-    app = Applications(
-        id=str(uuid.uuid4()),
-        association_id=user.association_id,
-        pharmacy_id=pharmacy_id or None,
-        name=name,
-        source_type=source_type,
-        status="active",
-    )
-    db.add(app)
-    db.flush()
-    app_id = app.id
-    db.commit()
-    return RedirectResponse(url=f"/applications/{app_id}", status_code=303)
-
-
-@router.get("/{app_id}")
-def application_detail(request: Request, app_id: str,
-                       db: Session = Depends(get_session),
-                       user: Users = Depends(require_role(*INGEST_ROLES))):
-    app = db.query(Applications).get(app_id)
-    if not app:
-        return HTMLResponse("<h1>Not found</h1>", status_code=404)
-    datasets = db.query(Datasets).filter(Datasets.application_id == app.id).order_by(
-        Datasets.uploaded_at.desc()).all()
-    profile = db.query(MappingProfiles).filter(
-        MappingProfiles.application_id == app.id).first()
-    return templates.TemplateResponse(
-        request, "applications/detail.html", {"request": request, "user": user,
-                                      "app": app, "datasets": datasets,
-                                      "profile": profile}
-    )
-
-
-# ---------------------------------------------------------------- upload
-@router.get("/{app_id}/upload")
-def step1_upload(request: Request, app_id: str, db: Session = Depends(get_session),
-                 user: Users = Depends(require_role(*INGEST_ROLES))):
-    return templates.TemplateResponse(
-        request, "uploads/step1_upload.html", {"request": request, "user": user,
-                                       "application_id": app_id}
-    )
-
-
-@router.post("/{app_id}/upload")
-def step1_upload_post(request: Request, app_id: str,
-                      db: Session = Depends(get_session),
-                      user: Users = Depends(require_role(*INGEST_ROLES)),
-                      file: UploadFile = File(...)):
-    app = db.get(Applications, app_id)
-    if not app:
-        return HTMLResponse("<h1>Not found</h1>", status_code=404)
-    filename = file.filename or "upload.csv"
-    max_bytes = int(request.app.state.settings.MAX_UPLOAD_BYTES)
-    # Read one byte past the limit so an oversized upload is detected without
-    # first buffering the whole file into memory.
-    content = file.file.read(max_bytes + 1)
-    if len(content) > max_bytes:
-        return templates.TemplateResponse(
-            request, "uploads/step3_result.html",
-            {"request": request, "user": user, "status": "rejected",
-             "message": f"File exceeds the {max_bytes // (1024 * 1024)} MB upload "
-                        "limit and was not accepted.",
-             "application_id": app.id},
+def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
+    """Validate and buffer uploaded files under the configured caps."""
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > settings.MAX_FILES_PER_REQUEST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files: {len(files)} (max {settings.MAX_FILES_PER_REQUEST})",
         )
-    content_hash = hashlib.sha256(content).hexdigest()
-
-    # Idempotency: refuse a byte-identical file that already committed for this
-    # application, because re-committing it would silently double revenue.
-    already = db.query(Datasets).filter(
-        Datasets.application_id == app.id,
-        Datasets.content_hash == content_hash,
-        Datasets.status == "committed",
-    ).first()
-    if already:
-        return templates.TemplateResponse(
-            request, "uploads/step3_result.html",
-            {"request": request, "user": user, "status": "duplicate",
-             "message": "This exact file was already committed for this "
-                        f"application on {already.uploaded_at:%Y-%m-%d %H:%M}. "
-                        "Re-uploading it would double the reported revenue, so it "
-                        "was not accepted.",
-             "application_id": app.id},
-        )
-    
-    # Check if it's a zip file
-    is_zip = filename.lower().endswith(".zip")
-    # Check if it's an Excel file with multiple sheets
-    is_excel = filename.lower().endswith((".xlsx", ".xls"))
-    
-    dataset = Datasets(
-        id=str(uuid.uuid4()),
-        association_id=app.association_id,
-        application_id=app.id,
-        bronze_file_path="",  # set after saving below
-        original_filename=filename,
-        content_hash=content_hash,
-        uploaded_by=user.id,
-        status="pending_mapping",
-    )
-    db.add(dataset)
-    db.flush()
-    dataset_id = dataset.id
-    
-    bronze_root = str(request.app.state.settings.BRONZE_STORAGE_PATH)
-    full_path = ingestion.save_bronze(
-        content, bronze_root, app.association_id, dataset_id, filename
-    )
-    dataset.bronze_file_path = full_path
-    db.commit()
-    
-    # For zip or multi-sheet Excel, redirect to bulk mapping page
-    if is_zip or is_excel:
-        # Check if Excel has multiple sheets
-        if is_excel:
-            sheets = ingestion.get_excel_sheets(full_path)
-            if len(sheets) > 1:
-                return RedirectResponse(
-                    url=f"/applications/datasets/{dataset_id}/bulk_mapping", status_code=303
-                )
-        if is_zip:
-            return RedirectResponse(
-                url=f"/applications/datasets/{dataset_id}/bulk_mapping", status_code=303
+    out = []
+    for f in files:
+        content = f.file.read()
+        if len(content) > settings.MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File {f.filename!r} exceeds {settings.MAX_FILE_BYTES} bytes",
             )
-    
-    return RedirectResponse(
-        url=f"/applications/datasets/{dataset_id}/mapping", status_code=303
-    )
+        out.append((f.filename, content))
+    return out
 
 
-# ---------------------------------------------------------------- bulk mapping (zip/multi-sheet)
-@router.get("/datasets/{dataset_id}/bulk_mapping")
-def bulk_mapping_page(request: Request, dataset_id: str,
-                      db: Session = Depends(get_session),
-                      user: Users = Depends(require_role(*INGEST_ROLES))):
-    dataset = db.query(Datasets).get(dataset_id)
-    if not dataset:
-        return HTMLResponse("<h1>Not found</h1>", status_code=404)
-    
-    file_path = dataset.bronze_file_path
-    classification_results = {}
-    
-    if file_path.lower().endswith(".zip"):
-        classification_results = classify_zip(file_path)
-    elif file_path.lower().endswith((".xlsx", ".xls")):
-        classification_results = classify_excel_sheets(file_path)
-    else:
-        classification_results = {dataset.original_filename: classify_file(file_path)}
-    
-    app = db.query(Applications).get(dataset.application_id)
-    
-    return templates.TemplateResponse(
-        request, "uploads/bulk_mapping.html",
-        {"request": request, "user": user, "dataset": dataset,
-         "application_id": dataset.application_id, "classification_results": classification_results,
-         "app": app},
-    )
-
-
-@router.post("/datasets/{dataset_id}/bulk_mapping")
-def bulk_mapping_confirm(request: Request, dataset_id: str,
-                         db: Session = Depends(get_session),
-                         user: Users = Depends(require_role(*INGEST_ROLES)),
-                         field_maps: str = Form("{}"),
-                         pharmacy_identifier_columns: str = Form("{}")):
-    import json
-    field_maps = json.loads(field_maps or "{}")
-    pharmacy_identifier_columns = json.loads(pharmacy_identifier_columns or "{}")
-    
-    dataset = db.get(Datasets, dataset_id)
-    if not dataset:
-        return HTMLResponse("<h1>Not found</h1>", status_code=404)
-    app = db.get(Applications, dataset.application_id)
-    
-    file_path = dataset.bronze_file_path
-    total_committed = 0
-    all_errors = []
-    
-    if file_path.lower().endswith(".zip"):
-        extracted = ingestion.extract_zip(
-            open(file_path, "rb").read(),
-            max_uncompressed=request.app.state.settings.zip_cap(),
+def _persist_files(session: Session, app_id: str, uploads: list[tuple[str, bytes]]) -> list[StoredFile]:
+    saved = []
+    for filename, content in uploads:
+        try:
+            file_type = ingestion.detect_file_type(filename)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        rel_path, sha256, size = storage.save_bytes(content, filename)
+        stored = StoredFile(
+            application_id=app_id,
+            original_filename=filename,
+            stored_path=rel_path,
+            sha256=sha256,
+            size_bytes=size,
+            file_type=file_type,
         )
-        for filename, content in extracted:
-            if filename.lower().endswith((".csv", ".xlsx", ".xls")):
-                # Save extracted file temporarily
-                import tempfile
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{filename.split('.')[-1]}") as tmp:
-                    tmp.write(content)
-                    tmp_path = tmp.name
-                
-                try:
-                    df = ingestion.read_frame(tmp_path)
-                    mapping = field_maps.get(filename, {})
-                    pharm_col = pharmacy_identifier_columns.get(filename)
-                    committed, errors = _process_dataframe(db, app, dataset.id, df, mapping, pharm_col, user.id)
-                    total_committed += committed
-                    all_errors.extend(errors)
-                finally:
-                    os.unlink(tmp_path)
-                    
-    elif file_path.lower().endswith((".xlsx", ".xls")):
-        sheets = ingestion.get_excel_sheets(file_path)
-        for sheet_name in sheets:
-            df = ingestion.read_excel_sheet(file_path, sheet_name)
-            mapping = field_maps.get(sheet_name, {})
-            pharm_col = pharmacy_identifier_columns.get(sheet_name)
-            committed, errors = _process_dataframe(db, app, dataset.id, df, mapping, pharm_col, user.id)
-            total_committed += committed
-            all_errors.extend(errors)
-    else:
-        df = ingestion.read_frame(file_path)
-        mapping = field_maps.get(dataset.original_filename, {})
-        pharm_col = pharmacy_identifier_columns.get(dataset.original_filename)
-        committed, errors = _process_dataframe(db, app, dataset.id, df, mapping, pharm_col, user.id)
-        total_committed += committed
-        all_errors.extend(errors)
-    
-    mapping_service.save_mapping_profile(db, app.id, app.association_id, field_maps, user.id)
-    dataset.status = "committed"
-    dataset.row_count = total_committed
-    db.commit()
-    
-    return templates.TemplateResponse(
-        request, "uploads/step3_result.html",
-        {"request": request, "user": user, "status": "committed",
-         "message": f"Committed {total_committed} row(s) across {len(classification_results)} file(s)/sheet(s).", 
-         "application_id": app.id, "errors": all_errors},
+        session.add(stored)
+        saved.append(stored)
+    session.flush()
+    return saved
+
+
+def _run_and_store_analysis(session: Session, app_obj: Application) -> Analysis:
+    files = (
+        session.query(StoredFile)
+        .filter(StoredFile.application_id == app_obj.id)
+        .order_by(StoredFile.created_at)
+        .all()
     )
+    if not files:
+        raise HTTPException(status_code=400, detail="Application has no files to analyze")
 
-
-def _process_dataframe(db, app, dataset_id, df, field_map, pharmacy_identifier_column, user_id):
-    """Process a single dataframe with the given mapping."""
-    if app.pharmacy_id is not None:
-        committed, errors, _ = ingestion.commit_dataset(
-            db, app.association_id, app.id, dataset_id, df, field_map,
-            app.pharmacy_id, user_id)
-        return committed, errors
-    else:
-        col = pharmacy_identifier_column or app.pharmacy_identifier_column
-        if not col:
-            return 0, [{"row": "N/A", "reasons": ["No pharmacy identifier column specified"]}]
-        
-        app.pharmacy_identifier_column = col
-        total_committed = 0
-        all_errors = []
-        for i, row in df.iterrows():
-            ph_id = mapping_service.resolve_pharmacy(db, app.association_id, row.get(col))
-            c, e, _ = ingestion.commit_dataset(
-                db, app.association_id, app.id, dataset_id, df.iloc[[i]], field_map,
-                ph_id, user_id)
-            total_committed += c
-            all_errors.extend(e)
-        return total_committed, all_errors
-
-
-# ---------------------------------------------------------------- mapping
-@router.get("/datasets/{dataset_id}/mapping")
-def mapping_page(request: Request, dataset_id: str,
-                 db: Session = Depends(get_session),
-                 user: Users = Depends(require_role(*INGEST_ROLES))):
-    dataset = db.query(Datasets).get(dataset_id)
-    if not dataset:
-        return HTMLResponse("<h1>Not found</h1>", status_code=404)
-    classification = classify_file(dataset.bronze_file_path)
-    if "error" in classification:
-        return HTMLResponse(f"<h1>Error</h1><p>{classification['error']}</p>", status_code=400)
-    df = ingestion.read_frame(dataset.bronze_file_path)
-    app = db.query(Applications).get(dataset.application_id)
-
-    pharm_hint = None
-    needs_pharmacy_identifier = app.pharmacy_id is None
-    if needs_pharmacy_identifier:
-        pharm_hint = mapping_service.pick_pharmacy_identifier_column(df)
-
-    return templates.TemplateResponse(
-        request, "uploads/step2_mapping.html",
-        {"request": request, "user": user, "dataset": dataset,
-         "application_id": dataset.application_id, "classification": classification,
-         "needs_pharmacy_identifier": needs_pharmacy_identifier,
-         "pharmacies": db.query(Pharmacies).filter(
-             Pharmacies.association_id == app.association_id).all(),
-         "pharmacy_columns": df.columns.tolist(),
-         "pharm_hint": pharm_hint},
-    )
-
-
-# ---- confirm (datasets router, mounted at top-level so the browser can POST
-# ---- to /datasets/{id}/confirm as the spec's route table requires)
-@datasets_router.post("/datasets/{dataset_id}/confirm", response_class=HTMLResponse)
-def dataset_confirm(dataset_id: str, request: Request,
-                    db: Session = Depends(get_session),
-                    user: Users = Depends(require_role(*INGEST_ROLES)),
-                    field_map: str = Form("{}"),
-                    pharmacy_identifier_column: str | None = Form(None)):
-    import json
-    field_map = json.loads(field_map or "{}")
-    dataset = db.get(Datasets, dataset_id)
-    if not dataset:
-        return HTMLResponse("<h1>Not found</h1>", status_code=404)
-    app = db.get(Applications, dataset.application_id)
-    app_id = app.id
-    assoc = db.get(Associations, app.association_id)
-    currency = assoc.default_currency if assoc and assoc.default_currency else "EGP"
-
-# ---- HARD GATE: a multi-pharmacy dataset must name its pharmacy column
-    if app.pharmacy_id is None and not (pharmacy_identifier_column or app.pharmacy_identifier_column):
-        dataset.status = "needs_pharmacy_identifier"
-        db.commit()
-        return templates.TemplateResponse(
-            request, "uploads/step3_result.html",
-            {"request": request, "user": user, "status": "blocked",
-             "message": "Multi-pharmacy file: choose the column that identifies "
-                          "the pharmacy before committing.",
-             "application_id": app_id},
-        )
-
-    df = ingestion.read_frame(dataset.bronze_file_path)
-    committed = 0
-    errors = []
-    if app.pharmacy_id is not None:
-        committed, errors, _ = ingestion.commit_dataset(
-            db, app.association_id, app.id, dataset.id, df, field_map,
-            app.pharmacy_id, user.id, currency=currency)
-    else:
-        col = pharmacy_identifier_column or app.pharmacy_identifier_column
-        if col:
-            app.pharmacy_identifier_column = col
-            for i, row in df.iterrows():
-                ph_id = mapping_service.resolve_pharmacy(db, app.association_id, row.get(col))
-                c, e, _ = ingestion.commit_dataset(
-                    db, app.association_id, app.id, dataset.id, df.iloc[[i]], field_map,
-                    ph_id, user.id, currency=currency)
-                committed += c
-                for err in e:
-                    errors.append(err)
-
-    mapping_service.save_mapping_profile(db, app.id, app.association_id, field_map, user.id)
-    dataset.status = "committed"
-    dataset.row_count = committed
-    db.commit()
-
-    return templates.TemplateResponse(
-        request, "uploads/step3_result.html",
-        {"request": request, "user": user, "status": "committed",
-         "message": f"Committed {committed} row(s).", "application_id": app_id,
-         "errors": errors},
-    )
-# ---------------------------------------------------------------- data explorer
-@router.get("/{app_id}/explorer")
-def explorer_page(request: Request, app_id: str, db: Session = Depends(get_session),
-                  user: Users = Depends(require_role(*EDIT_ROLES))):
-    return templates.TemplateResponse(
-        request, "data_explorer/grid.html", {"request": request, "user": user, "application_id": app_id}
-    )
-
-
-@router.get("/{app_id}/explorer/rows")
-def explorer_rows(request: Request, app_id: str, entity: str = "sales",
-                  db: Session = Depends(get_session),
-                  user: Users = Depends(require_role(*EDIT_ROLES))):
-    q = db.query(Sales).filter(Sales.application_id == app_id)
-    if user.pharmacy_id:
-        q = q.filter(Sales.pharmacy_id == user.pharmacy_id)
-    rows = q.order_by(Sales.sale_timestamp.desc()).limit(200).all()
-    return templates.TemplateResponse(
-        request, "data_explorer/_grid_rows.html", {"request": request, "user": user,
-                                           "entity": entity, "rows": rows}
-    )
-
-
-# Only these sale columns may be edited from the Data Explorer. Anything else is
-# refused, so a client cannot overwrite an association/foreign key via the grid.
-EDITABLE_SALE_FIELDS = {
-    "sale_timestamp", "payment_method", "total_amount", "transaction_ref", "currency",
-}
-
-
-def _load_editable_sale(db, user, row_id):
-    """Load a sale for editing, enforcing pharmacy scope on writes.
-
-    RLS confines reads to the association; a pharmacy-scoped role must also be
-    stopped from editing another branch's rows, which RLS alone does not do.
-    """
-    row = db.query(Sales).get(row_id)
-    if not row:
-        return None, HTMLResponse("missing", status_code=404)
-    if user.pharmacy_id and str(row.pharmacy_id) != str(user.pharmacy_id):
-        return None, HTMLResponse("forbidden", status_code=403)
-    return row, None
-
-
-@router.post("/{app_id}/explorer/cell")
-def explorer_cell(app_id: str, request: Request,
-                  db: Session = Depends(get_session),
-                  user: Users = Depends(require_role(*EDIT_ROLES)),
-                  row_id: str = Form(...), field: str = Form(...),
-                  value: str = Form(...)):
-    if field not in EDITABLE_SALE_FIELDS:
-        return HTMLResponse(f"field not editable: {field}", status_code=400)
-    row, error = _load_editable_sale(db, user, row_id)
-    if error is not None:
-        return error
+    analysis = Analysis(application_id=app_obj.id, status="completed")
     try:
-        new_value = _cast(field, value)
-    except ValueError as exc:
-        return HTMLResponse(str(exc), status_code=400)
-    old_value = getattr(row, field)
-    # Audit FIRST (before applying the change) in the same transaction
-    audit_service.log_edit(db, user.association_id, user.id, "sales", row.id, field,
-                           old_value, new_value, reason="cell edit")
-    setattr(row, field, new_value)
-    db.commit()
-    return HTMLResponse("ok")
+        summary, report = pipeline.analyze_application(app_obj, files)
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+    analysis.summary = summary
+    analysis.report = report
+    analysis.completed_at = datetime.now(timezone.utc)
+    session.add(analysis)
+    session.commit()
+    session.refresh(analysis)
+    return analysis
 
 
-def _cast(field, value):
-    """Convert a client-supplied value to the column's type.
-
-    Raises ValueError for input that cannot be stored in that column, so the
-    caller can answer 400 instead of letting the database raise a 500.
-    """
-    if field == "total_amount":
-        number = ingestion._number(value)
-        if number is None:
-            raise ValueError("total_amount must be a number")
-        return number
-    if field == "sale_timestamp":
-        return ingestion.parse_date(value)
-    return value
+def _analysis_response(analysis: Analysis) -> dict:
+    return {
+        "application_id": analysis.application_id,
+        "analysis_id": analysis.id,
+        "created_at": analysis.created_at.isoformat() if analysis.created_at else None,
+        "summary": analysis.summary,
+        "report": analysis.report,
+    }
 
 
-@router.post("/{app_id}/explorer/revert/{edit_id}")
-def explorer_revert(app_id: str, edit_id: str, request: Request,
-                    db: Session = Depends(get_session),
-                    user: Users = Depends(require_role(*EDIT_ROLES))):
-    edit = db.query(EditAuditLog).get(edit_id)
-    if not edit:
-        return HTMLResponse("missing", status_code=404)
-    if edit.field not in EDITABLE_SALE_FIELDS:
-        return HTMLResponse(f"field not editable: {edit.field}", status_code=400)
-    row, error = _load_editable_sale(db, user, edit.entity_id)
-    if error is not None:
-        return error
+def _application_or_404(db: Session, application_id: str) -> Application:
+    """Resolve an id against the UUID primary key; 404 on missing or malformed."""
     try:
-        restored = _cast(edit.field, edit.old_value)
-    except ValueError as exc:
-        return HTMLResponse(str(exc), status_code=400)
-    current = getattr(row, edit.field)
-    # Write a NEW audit row restoring the value; the original trail is kept.
-    audit_service.log_edit(db, user.association_id, user.id, "sales",
-                           row.id, edit.field, current, restored, reason="revert")
-    setattr(row, edit.field, restored)
+        uuid.UUID(application_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Application not found")
+    app_obj = db.get(Application, application_id)
+    if app_obj is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return app_obj
+
+
+# --- one-shot: an application + its files in a single request ------------
+
+
+@router.post("/analyze", summary="Upload an application's files and analyze them in one request")
+def analyze_application_one_shot(
+    application_name: str = Form(...),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    uploads = _read_uploads(files)
+    if application_name.strip() == "":
+        raise HTTPException(status_code=400, detail="application_name is required")
+
+    app_obj = (
+        db.query(Application).filter(Application.name == application_name.strip()).first()
+    )
+    if app_obj is None:
+        app_obj = Application(name=application_name.strip())
+        db.add(app_obj)
+        db.flush()
+
+    _persist_files(db, app_obj.id, uploads)
+    analysis = _run_and_store_analysis(db, app_obj)
+    return _analysis_response(analysis)
+
+
+# --- applications --------------------------------------------------------
+
+
+@router.post("/applications", status_code=201, summary="Create an empty application")
+def create_application(body: NewApplication, db: Session = Depends(get_db)):
+    app_obj = Application(name=body.name.strip(), metadata_json=body.metadata or {})
+    db.add(app_obj)
     db.commit()
-    return HTMLResponse("ok")
+    db.refresh(app_obj)
+    return {
+        "id": app_obj.id,
+        "name": app_obj.name,
+        "metadata": app_obj.metadata_json,
+        "created_at": app_obj.created_at.isoformat() if app_obj.created_at else None,
+    }
+
+
+@router.get("/applications/{application_id}", summary="Application detail: files + analyses summary")
+def get_application(application_id: str, db: Session = Depends(get_db)):
+    app_obj = _application_or_404(db, application_id)
+    files = (
+        db.query(StoredFile)
+        .filter(StoredFile.application_id == app_obj.id)
+        .order_by(StoredFile.created_at)
+        .all()
+    )
+    analyses = (
+        db.query(Analysis)
+        .filter(Analysis.application_id == app_obj.id)
+        .order_by(Analysis.created_at.desc())
+        .all()
+    )
+    return {
+        "id": app_obj.id,
+        "name": app_obj.name,
+        "metadata": app_obj.metadata_json,
+        "created_at": app_obj.created_at.isoformat() if app_obj.created_at else None,
+        "files": [
+            {
+                "id": f.id,
+                "original_filename": f.original_filename,
+                "file_type": f.file_type,
+                "size_bytes": f.size_bytes,
+                "sha256": f.sha256,
+                "status": f.status,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+            for f in files
+        ],
+        "analyses": [
+            {
+                "id": a.id,
+                "status": a.status,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "summary": a.summary,
+            }
+            for a in analyses
+        ],
+    }
+
+
+@router.post("/applications/{application_id}/files", summary="Upload files to an application and analyze")
+def upload_files(
+    application_id: str,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    app_obj = _application_or_404(db, application_id)
+    uploads = _read_uploads(files)
+    _persist_files(db, app_obj.id, uploads)
+    analysis = _run_and_store_analysis(db, app_obj)
+    return _analysis_response(analysis)
+
+
+@router.post("/applications/{application_id}/analyze", summary="Re-run analysis over existing files")
+def reanalyze(application_id: str, db: Session = Depends(get_db)):
+    app_obj = _application_or_404(db, application_id)
+    analysis = _run_and_store_analysis(db, app_obj)
+    return _analysis_response(analysis)

@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SiroQ — Pharmacy Analytics Platform</title>
+<style>
+:root{
+  --bg:#070b14; --bg2:#0b1220; --card:rgba(255,255,255,.045); --card2:rgba(255,255,255,.07);
+  --line:rgba(255,255,255,.10); --txt:#e8eefc; --mut:#8ea0c0; --acc:#2dd4bf; --acc2:#8b5cf6;
+  --amber:#fbbf24; --red:#f87171; --ok:#34d399; --shadow:0 18px 50px -12px rgba(0,0,0,.6);
+  --radius:18px;
+}
+html[data-theme="light"]{
+  --bg:#eef2fa; --bg2:#f8fbff; --card:rgba(255,255,255,.75); --card2:rgba(255,255,255,.92);
+  --line:rgba(12,25,55,.10); --txt:#0d1830; --mut:#51618a; --shadow:0 18px 40px -18px rgba(20,40,90,.25);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Arabic",Arial,sans-serif;
+  background:var(--bg); color:var(--txt); line-height:1.6; overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+/* animated gradient mesh background */
+.mesh{position:fixed; inset:0; z-index:-2; background:
+  radial-gradient(60% 50% at 12% 8%, rgba(45,212,191,.16), transparent 60%),
+  radial-gradient(50% 45% at 88% 12%, rgba(139,92,246,.18), transparent 60%),
+  radial-gradient(55% 55% at 50% 100%, rgba(45,132,251,.12), transparent 65%),
+  var(--bg);
+  filter:saturate(1.1);}
+.orb{position:fixed; border-radius:50%; filter:blur(70px); opacity:.5; z-index:-1; pointer-events:none}
+.orb.a{width:420px;height:420px;background:#14b8a6;top:-120px;left:-100px;animation:drift 22s ease-in-out infinite}
+.orb.b{width:380px;height:380px;background:#7c3aed;top:20%;right:-120px;animation:drift 26s ease-in-out infinite reverse}
+.orb.c{width:300px;height:300px;background:#2563eb;bottom:-100px;left:30%;animation:drift 30s ease-in-out infinite}
+@keyframes drift{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(60px,40px) scale(1.08)}66%{transform:translate(-40px,70px) scale(.94)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+.wrap{max-width:1180px;margin:0 auto;padding:0 22px}
+section{padding:76px 0}
+h2.sec{font-size:clamp(26px,4vw,38px);letter-spacing:-.02em;margin-bottom:8px}
+p.lead{color:var(--mut);max-width:640px;margin-bottom:34px}
+.kicker{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--acc);margin-bottom:14px;font-weight:700}
+.kicker:before{content:"";width:26px;height:2px;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:2px}
+
+/* glass card */
+.g{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);box-shadow:var(--shadow)}
+.g:hover{border-color:rgba(45,212,191,.35)}
+.g{transition:border-color .3s, transform .3s}
+
+/* reveal on scroll */
+.rv{opacity:0;transform:translateY(26px);transition:opacity .7s ease,transform .7s ease}
+.rv.on{opacity:1;transform:none}
+
+/* nav */
+nav.top{position:sticky;top:0;z-index:50;backdrop-filter:blur(16px);
+  background:color-mix(in srgb,var(--bg) 72%,transparent);border-bottom:1px solid var(--line)}
+nav.top .in{max-width:1180px;margin:0 auto;padding:12px 22px;display:flex;align-items:center;gap:18px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:-.02em;font-size:19px}
+.logo .mark{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--acc),var(--acc2));color:#04121a;font-size:15px;font-weight:900}
+nav.top a.lnk{color:var(--mut);text-decoration:none;font-size:14px;padding:6px 10px;border-radius:8px}
+nav.top a.lnk:hover{color:var(--txt);background:var(--card)}
+nav.top .sp{flex:1}
+.btn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);cursor:pointer;
+  color:var(--txt);background:var(--card);padding:9px 16px;border-radius:11px;font-size:14px;
+  font-weight:600;text-decoration:none;transition:.25s}
+.btn:hover{border-color:var(--acc);transform:translateY(-1px)}
+.btn.pri{background:linear-gradient(135deg,var(--acc),#22b8cf);color:#03121b;border:none}
+.btn.gh{background:var(--card2)}
+</style>
+<style>
+/* hero */
+.hero{padding:96px 0 60px;position:relative}
+.hero h1{font-size:clamp(38px,7vw,72px);line-height:1.04;letter-spacing:-.035em;font-weight:800}
+.hero h1 .grad{background:linear-gradient(120deg,var(--acc),var(--acc2) 70%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p.sub{color:var(--mut);font-size:clamp(16px,2.2vw,20px);max-width:620px;margin-top:18px}
+.hero .ar{font-family:"Noto Sans Arabic","Segoe UI",Tahoma,sans-serif;color:var(--acc2);opacity:.9}
+.badges{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:999px;
+  background:var(--card);border:1px solid var(--line);font-size:13px;color:var(--mut);
+  backdrop-filter:blur(10px);transition:.25s}
+.chip:hover{color:var(--txt);border-color:var(--acc);transform:translateY(-2px)}
+.chip b{color:var(--acc)}
+.cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:30px}
+
+/* counters */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-top:44px}
+.stat{padding:20px;text-align:center;position:relative;overflow:hidden}
+.stat:after{content:"";position:absolute;inset:0;background:linear-gradient(120deg,rgba(45,212,191,.08),transparent 60%);pointer-events:none}
+.stat .n{font-size:clamp(28px,4vw,42px);font-weight:800;letter-spacing:-.03em;
+  background:linear-gradient(120deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.stat .l{font-size:12.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.1em;margin-top:4px}
+
+/* tabs */
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:22px}
+.tab{padding:10px 18px;border-radius:12px;cursor:pointer;font-size:14px;font-weight:600;
+  background:var(--card);border:1px solid var(--line);color:var(--mut);transition:.25s;user-select:none}
+.tab:hover{color:var(--txt);border-color:var(--acc)}
+.tab.on{color:#03121b;background:linear-gradient(135deg,var(--acc),#60a5fa);border-color:transparent;box-shadow:0 8px 24px -8px rgba(45,212,191,.5)}
+.panel{display:none;animation:fade .45s ease}
+.panel.on{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.f{padding:20px}
+.f h4{font-size:16px;margin-bottom:6px;display:flex;gap:9px;align-items:center}
+.f p{font-size:13.8px;color:var(--mut)}
+.f .ic{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;font-size:17px;
+  background:linear-gradient(135deg,rgba(45,212,191,.18),rgba(139,92,246,.18));border:1px solid var(--line);flex:none}
+
+/* search */
+.search{position:relative;margin-bottom:20px}
+.search input{width:100%;padding:13px 16px 13px 42px;border-radius:13px;border:1px solid var(--line);
+  background:var(--card);color:var(--txt);font-size:14.5px;outline:none;transition:.25s}
+.search input:focus{border-color:var(--acc);box-shadow:0 0 0 4px rgba(45,212,191,.12)}
+.search input::placeholder{color:var(--mut)}
+.search .mag{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--mut);font-size:15px}
+.nores{display:none;text-align:center;color:var(--mut);padding:26px;font-size:14px}
+
+/* pipeline */
+.pipe{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;align-items:stretch}
+.step{padding:18px 14px;text-align:center;position:relative;cursor:pointer;transition:.3s;border:1px solid var(--line);border-radius:16px;background:var(--card)}
+.step .em{font-size:26px;display:block;margin-bottom:8px;filter:grayscale(.6);transition:.3s}
+.step h5{font-size:13.5px;margin-bottom:3px}
+.step p{font-size:11.5px;color:var(--mut);line-height:1.45}
+.step.on{border-color:var(--acc);background:linear-gradient(160deg,rgba(45,212,191,.14),rgba(139,92,246,.08));transform:translateY(-4px)}
+.step.on .em{filter:none;transform:scale(1.18)}
+.step .tag{position:absolute;top:10px;right:10px;font-size:9px;letter-spacing:.08em;color:var(--amber);
+  border:1px solid rgba(251,191,36,.4);padding:2px 6px;border-radius:6px;text-transform:uppercase}
+.pbar{height:4px;border-radius:4px;background:var(--line);margin:20px 0 6px;overflow:hidden}
+.pbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:4px;transition:width .5s ease}
+.plabel{font-size:12px;color:var(--mut);text-align:right}
+</style>
+<style>
+/* dashboards mock */
+.dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.dash .g{padding:22px}
+.dash h4{font-size:15px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center}
+.dash h4 small{color:var(--mut);font-weight:500;font-size:11.5px}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+.kpi{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:12px;text-align:center}
+.kpi .v{font-size:19px;font-weight:800;color:var(--acc)}
+.kpi .t{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.07em}
+.bars{display:flex;align-items:flex-end;gap:7px;height:110px;padding-top:6px}
+.bars i{flex:1;border-radius:6px 6px 2px 2px;background:linear-gradient(180deg,var(--acc),rgba(45,212,191,.25));
+  min-height:8%;transform:scaleY(0);transform-origin:bottom;transition:transform .8s cubic-bezier(.2,.8,.2,1)}
+.rv.on .bars i{transform:scaleY(1)}
+.bars.v2 i{background:linear-gradient(180deg,var(--acc2),rgba(139,92,246,.25))}
+.bars.red i{background:linear-gradient(180deg,var(--red),rgba(248,113,113,.2))}
+.legend{display:flex;gap:14px;margin-top:12px;font-size:11.5px;color:var(--mut)}
+.legend s{text-decoration:none;display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px}
+.expiry{margin-top:14px;font-size:12px}
+.expiry .row{display:flex;justify-content:space-between;padding:7px 10px;border-radius:9px;background:var(--card2);border:1px solid var(--line);margin-top:6px}
+.pill{font-size:10px;padding:2px 8px;border-radius:999px;font-weight:700}
+.pill.r{background:rgba(248,113,113,.15);color:var(--red)}
+.pill.a{background:rgba(251,191,36,.15);color:var(--amber)}
+.pill.g{background:rgba(52,211,153,.15);color:var(--ok)}
+
+/* security table */
+.sec-table{width:100%;border-collapse:collapse;font-size:13.5px}
+.sec-table th{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--mut);
+  text-align:left;padding:12px 14px;border-bottom:1px solid var(--line)}
+.sec-table td{padding:13px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+.sec-table tr:last-child td{border-bottom:none}
+.sec-table tr:hover td{background:var(--card)}
+.sec-table .t{color:var(--txt);font-weight:600;white-space:nowrap}
+.sec-table .c{color:var(--mut)}
+.okmark{color:var(--ok);font-weight:800}
+
+/* limits */
+.limits{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.limit{padding:18px;border-left:3px solid var(--amber);border-radius:14px;background:var(--card);border-top:1px solid var(--line);border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+.limit h5{font-size:14px;color:var(--amber);display:flex;gap:8px;margin-bottom:5px}
+.limit p{font-size:13px;color:var(--mut)}
+
+/* footer */
+.stack{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.stk{padding:14px;text-align:center;font-size:13px;border-radius:12px;background:var(--card);border:1px solid var(--line)}
+.stk b{display:block;color:var(--acc);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}
+footer{border-top:1px solid var(--line);padding:34px 0 44px;color:var(--mut);font-size:13px}
+footer .in{max-width:1180px;margin:0 auto;padding:0 22px;display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;align-items:center}
+code.mk{background:var(--card2);border:1px solid var(--line);padding:3px 9px;border-radius:8px;font-size:12.5px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--acc);cursor:pointer;transition:.2s}
+code.mk:hover{border-color:var(--acc)}
+</style>
+</head>
+<body>
+<div class="mesh"></div><div class="orb a"></div><div class="orb b"></div><div class="orb c"></div>
+
+<nav class="top"><div class="in">
+  <div class="logo"><span class="mark">S</span> SiroQ</div>
+  <a class="lnk" href="#platform">Platform</a>
+  <a class="lnk" href="#pipeline">Pipeline</a>
+  <a class="lnk" href="#dashboards">Dashboards</a>
+  <a class="lnk" href="#security">Security</a>
+  <span class="sp"></span>
+  <button class="btn" id="themeBtn" title="Toggle theme">🌙</button>
+</div></nav>
+
+<!-- HERO -->
+<header class="hero wrap">
+  <div class="kicker">Pharmacy intelligence, hardened for pilot</div>
+  <h1>From messy spreadsheets<br>to <span class="grad">trusted pharmacy insight.</span></h1>
+  <p class="sub">SiroQ ingests non-deterministic sales &amp; inventory files, auto-maps them into a
+    multi-tenant canonical schema, and serves scope-aware analytics — with database-level
+    tenant isolation and an append-only audit trail. <span class="ar">ذكاء تحليلي للصيدليات</span></p>
+  <div class="badges">
+    <span class="chip">🏥 <b>Multi-tenant</b>&nbsp;SaaS-ready</span>
+    <span class="chip">🇪🇬 EGP · Africa/Cairo</span>
+    <span class="chip">🌐 <b>Bilingual</b>&nbsp;EN/AR · RTL-ready</span>
+    <span class="chip">🧠 <b>Auto-mapping</b>&nbsp;EN+AR headers</span>
+    <span class="chip">🛡️ <b>RLS</b>&nbsp;fail-closed</span>
+    <span class="chip">📜 <b>Immutable</b>&nbsp;bronze layer</span>
+  </div>
+  <div class="cta">
+    <a class="btn pri" href="#platform">Explore capabilities ↓</a>
+    <code class="mk" data-copy="make up && make migrate && make seed" title="Click to copy">make up && make migrate && make seed</code>
+  </div>
+</header>
+
+<section id="platform" class="wrap rv">
+  <div class="stats" id="stats">
+    <div class="g stat"><div class="n" data-n="26">0</div><div class="l">DB Tables</div></div>
+    <div class="g stat"><div class="n" data-n="28">0</div><div class="l">Routes</div></div>
+    <div class="g stat"><div class="n" data-n="21">0</div><div class="l">Templates</div></div>
+    <div class="g stat"><div class="n" data-n="36">0</div><div class="l">Tests · all green</div></div>
+    <div class="g stat"><div class="n" data-n="24">0</div><div class="l">RLS Policies</div></div>
+    <div class="g stat"><div class="n" data-n="9">0</div><div class="l">Analytics Engines</div></div>
+  </div>
+</section>
+
+<!-- CAPABILITIES -->
+<section class="wrap rv" id="caps">
+  <div class="kicker">Capabilities</div>
+  <h2 class="sec">Everything it can do, at a glance</h2>
+  <p class="lead">Filter live with the search box, or browse by capability. Every item maps to real, tested code in the repo.</p>
+  <div class="search"><span class="mag">🔎</span>
+    <input id="q" type="search" placeholder="Search features… try “zip”, “audit”, “Arabic”, “expiry”" autocomplete="off">
+  </div>
+  <div class="tabs" id="tabs">
+    <div class="tab on" data-t="t1">🏢 Multi-Tenancy</div>
+    <div class="tab" data-t="t2">🔐 Auth &amp; RBAC</div>
+    <div class="tab" data-t="t3">📥 Ingestion</div>
+    <div class="tab" data-t="t4">🧠 Auto-Mapping</div>
+    <div class="tab" data-t="t5">🗂️ Data Explorer</div>
+    <div class="tab" data-t="t6">📈 Dashboards</div>
+    <div class="tab" data-t="t7">🛡️ Security</div>
+  </div>
+  <p class="nores" id="nores">No features match that search — try another keyword. 🔍</p>
+  <div class="featwrap">
+<!--MORE-->
+  <div class="panel on grid" id="t1">
+    <div class="g f" data-k="association pharmacy hierarchy tenant organization"><h4><span class="ic">🏢</span>Hierarchy containment</h4><p>Association → Pharmacy → Application → Dataset → Rows, enforced at every layer — a dataset can never point outside its application.</p></div>
+    <div class="g f" data-k="scope pharmacy locked association wide visibility"><h4><span class="ic">🎯</span>One-field scope model</h4><p>A user is either locked to one Pharmacy or has Association-wide visibility. No separate scope-state to manage, no toggle to forget.</p></div>
+    <div class="g f" data-k="admin manage pharmacies users create"><h4><span class="ic">🛠️</span>Admin console</h4><p>Association Admins create and manage Pharmacies and Users inside their own association via dedicated UI screens.</p></div>
+    <div class="g f" data-k="saas multi tenant postgres rls isolation"><h4><span class="ic">🗄️</span>26-table canonical schema</h4><p>PostgreSQL + PostGIS with a single migration chain; tenant boundary enforced by the database itself, not just app code.</p></div>
+    <div class="g f" data-k="seed demo idempotent environment"><h4><span class="ic">🌱</span>Idempotent demo seeding</h4><p><code>make seed</code> builds demo tenants, branches and users reproducibly — safe to run any number of times.</p></div>
+    <div class="g f" data-k="arabic rtl right-to-left language"><h4><span class="ic">🌐</span>RTL-ready bilingual UI</h4><p>Bootstrap 5 official RTL bundle plus English + Arabic synonym dictionaries in the mapper — built for Egyptian pharmacy chains.</p></div>
+  </div>
+  <div class="panel grid" id="t2">
+    <div class="g f" data-k="roles rbac admin manager analyst steward viewer"><h4><span class="ic">👥</span>Five-role RBAC</h4><p>Association Admin, Pharmacy Manager, Analyst, Data Steward, Viewer — each with a distinct permission matrix.</p></div>
+    <div class="g f" data-k="deny default role check per route"><h4><span class="ic">🚫</span>Deny-by-default</h4><p>Every write action requires an explicit per-route role match. There is no “allow if unsure” branch anywhere in the auth code.</p></div>
+    <div class="g f" data-k="session cookie bcrypt password hash login"><h4><span class="ic">🍪</span>Signed sessions + bcrypt</h4><p>Starlette SessionMiddleware with itsdangerous signed cookies; passlib bcrypt hashing; no public self-registration.</p></div>
+    <div class="g f" data-k="login security definer auth rls lookup"><h4><span class="ic">🔎</span>RLS-safe authentication</h4><p>Pre-login user lookup runs through a SECURITY DEFINER function, so authentication never needs to weaken row-level security.</p></div>
+    <div class="g f" data-k="secret key validator production session forge"><h4><span class="ic">🔑</span>Secret validator</h4><p>Refuses to boot outside development with the shipped placeholder signing key — forgeable session cookies can’t ship by accident.</p></div>
+    <div class="g f" data-k="403 friendly error page"><h4><span class="ic">🪧</span>Friendly denial pages</h4><p>403s render a proper page instead of leaking JSON; redirects stay clean for expired sessions.</p></div>
+  </div>
+<!--MORE-->
+</section>
+  <div class="panel grid" id="t3">
+    <div class="g f" data-k="csv xlsx excel zip multi sheet upload"><h4><span class="ic">📤</span>Any pharmacy file</h4><p>Single CSV, multi-sheet Excel, or a whole ZIP of mixed files — one upload, one bulk mapping page, one confirm.</p></div>
+    <div class="g f" data-k="bronze immutable raw storage bytes"><h4><span class="ic">📜</span>Immutable bronze layer</h4><p>Every upload is stored byte-for-byte and never rewritten. A bad mapping can always be re-run from the original file with zero loss.</p></div>
+    <div class="g f" data-k="partial success validation bad rows reason skip"><h4><span class="ic">✅</span>Partial-success commit</h4><p>Valid rows commit even when siblings fail; every skipped row comes back with a stated reason — bad rows never poison good ones.</p></div>
+    <div class="g f" data-k="duplicate content hash idempotency double revenue"><h4><span class="ic">♻️</span>Duplicate-upload blocking</h4><p>SHA-256 content hash per dataset: re-committing an identical file is refused with a clear message instead of silently doubling revenue.</p></div>
+    <div class="g f" data-k="transaction ref dedup distinct count"><h4><span class="ic">🧾</span>Transaction-level dedup</h4><p><code>transaction_ref</code> with <code>DISTINCT coalesce(transaction_ref, row_id)</code> counting keeps transaction counts honest across re-runs.</p></div>
+    <div class="g f" data-k="pharmacy attribution identifier column gate"><h4><span class="ic">🏷️</span>Hard attribution gate</h4><p>Every row must resolve to exactly one pharmacy; an unattributable file halts and asks — it never silently proceeds.</p></div>
+  </div>
+  <div class="panel grid" id="t4">
+    <div class="g f" data-k="fuzzy header matching bilingual arabic english synonyms rapidfuzz"><h4><span class="ic">🔤</span>Bilingual fuzzy headers</h4><p>rapidfuzz matching over English + Arabic synonym dictionaries (sale_timestamp / تاريخ البيع, total_amount / الإجمالي …).</p></div>
+    <div class="g f" data-k="content detection statistical date numeric categorical inference"><h4><span class="ic">📊</span>Content-based inference</h4><p>A second layer statistically inspects cell values — dates, numerics, categoricals — so headers that lie get overruled.</p></div>
+    <div class="g f" data-k="confidence score review green amber red ui"><h4><span class="ic">🚦</span>Confidence-scored review</h4><p>Per-field scores color the review UI green / amber / red; suggestions under 70% are suppressed, not guessed.</p></div>
+    <div class="g f" data-k="human in the loop confirm mapping profile memory reuse"><h4><span class="ic">🙋</span>Human-in-the-loop</h4><p>Nothing is auto-committed without review — and confirmed mappings are remembered per application for the next upload.</p></div>
+    <div class="g f" data-k="snake_case canonical field synonyms normalize"><h4><span class="ic">🐣</span>Canonical normalization</h4><p>Column chaos collapses to canonical snake_case fields; unmapped source columns survive in a JSON attribute bag.</p></div>
+    <div class="g f" data-k="entity disambiguation sales inventory target"><h4><span class="ic">🧭</span>Entity disambiguation</h4><p>When a file could be sales or inventory events, the classifier says which — and asks when unsure.</p></div>
+  </div>
+  <div class="panel grid" id="t5">
+    <div class="g f" data-k="grid table paginated filterable explorer"><h4><span class="ic">📃</span>Filterable grid</h4><p>Paginated, filterable tables per canonical entity with HTMX partial-page updates — no full reloads.</p></div>
+    <div class="g f" data-k="inline cell edit allow-list typed casting 400"><h4><span class="ic">✏️</span>Guarded inline editing</h4><p>Only allow-listed columns are editable, values are type-cast server-side (bad input → clean 400, never a 500).</p></div>
+    <div class="g f" data-k="audit log who when old new before applied"><h4><span class="ic">🧾</span>Audit-before-edit</h4><p>Every mutation is logged — who, when, old value, new value — in the same transaction, before the change is applied.</p></div>
+    <div class="g f" data-k="revert restore append-only history never erased"><h4><span class="ic">⏪</span>Append-only revert</h4><p>Reverting writes a NEW audit entry; history is never rewritten, so any value’s full story is reconstructable.</p></div>
+    <div class="g f" data-k="pharmacy scoped write 403 cross tenant"><h4><span class="ic">🔒</span>Pharmacy-scoped writes</h4><p>A pharmacy-locked user editing another branch’s row gets a 403 — enforced on top of RLS, not instead of it.</p></div>
+    <div class="g f" data-k="mass assignment field allow list"><h4><span class="ic">🛑</span>Mass-assignment shield</h4><p>Clients cannot name non-editable columns like <code>association_id</code> — the allow-list refuses before the write.</p></div>
+  </div>
+  <div class="panel grid" id="t6">
+    <div class="g f" data-k="sales kpi revenue transactions basket chart"><h4><span class="ic">💰</span>Sales dashboard</h4><p>Revenue, transaction count and average basket — with revenue-over-time and top-products charts in EGP.</p></div>
+    <div class="g f" data-k="inventory waste expiry turnover kpi batches 30 60 90"><h4><span class="ic">💊</span>Inventory &amp; waste</h4><p>Units near expiry, waste cost, turnover ratio, waste-by-product chart, and a 30/60/90-day expiring-batch table.</p></div>
+    <div class="g f" data-k="scope aware dashboard pharmacy association filter"><h4><span class="ic">🎚</span>Scope-aware everything</h4><p>Every tile and chart respects the viewer’s scope automatically — no manual filter needed for pharmacy-locked roles.</p></div>
+    <div class="g f" data-k="currency egp cairo timezone stamping"><h4><span class="ic">🇪🇬</span>Localized defaults</h4><p>EGP currency stamping and Africa/Cairo timezone handling baked into ingestion and reporting.</p></div>
+    <div class="g f" data-k="abc xyz margin payer adherence controlled procurement analytics engines"><h4><span class="ic">🧪</span>Nine analytics engines</h4><p>Inventory optimization, ABC/XYZ, margins, payer performance, adherence, controlled substances, procurement/supplier — service layer ready, UI routes next.</p></div>
+    <div class="g f" data-k="real values not hard coded tiles"><h4><span class="ic">🎯</span>Real data, real tiles</h4><p>KPI tiles render live query results — totals, dates and currency all come from your data, not placeholder zeros.</p></div>
+  </div>
+  <div class="panel grid" id="t7">
+    <div class="g f" data-k="row level security rls policies fail closed nullif"><h4><span class="ic">🏰</span>Fail-closed RLS</h4><p>All 24 tenanted-table policies rebuild the tenant key with <code>nullif(…,'')::uuid</code> — an empty context hides every row, it never opens the vault.</p></div>
+    <div class="g f" data-k="two database roles least privilege owner app"><h4><span class="ic">👥</span>Two-role database</h4><p>The app runs as a least-privileged role; the migration owner role can never be used to bypass isolation policies at runtime.</p></div>
+    <div class="g f" data-k="zip bomb cap uncompressed memory guard"><h4><span class="ic">💣</span>Zip-bomb guard</h4><p>Total decompression is capped before reading (default 200 MB) — a tiny archive can’t exhaust memory or disk.</p></div>
+    <div class="g f" data-k="path traversal zip slip safe filename sanitize"><h4><span class="ic">🧷</span>Path-traversal shield</h4><p>Upload and zip-entry names are reduced to sanitized basenames — <code>../../etc/passwd</code> can’t escape the bronze root.</p></div>
+    <div class="g f" data-k="csrf cross origin post referer 403 same origin guard"><h4><span class="ic">🛡️</span>CSRF same-origin guard</h4><p>Cross-site form POSTs are rejected with a 403 before any handler runs — live-verified against the running container.</p></div>
+    <div class="g f" data-k="oversize upload limit bytes reject"><h4><span class="ic">📏</span>Upload size cap</h4><p>Oversized files are detected by reading just one byte past the limit — no memory blowout, just a friendly rejection page.</p></div>
+  </div>
+  </div>
+</section>
+
+<!-- PIPELINE -->
+<section class="wrap rv" id="pipeline">
+  <div class="kicker">The pipeline</div>
+  <h2 class="sec">Upload → insight, with guards at every gate</h2>
+  <p class="lead">Click any stage to inspect it — or just watch it play. ⚠️ nodes are hard security checkpoints.</p>
+  <div class="pipe" id="pipe">
+    <div class="step" data-i="0"><span class="em">📤</span><h5>Upload</h5><p>CSV · XLSX · ZIP</p></div>
+    <div class="step" data-i="1"><span class="tag">guard</span><span class="em">🛡️</span><h5>Size &amp; zip caps</h5><p>byte-past-end cap + 200 MB decompression limit</p></div>
+    <div class="step" data-i="2"><span class="em">📁</span><h5>Bronze store</h5><p>immutable, byte-for-byte</p></div>
+    <div class="step" data-i="3"><span class="em">🧠</span><h5>Classify</h5><p>EN+AR headers · content stats</p></div>
+    <div class="step" data-i="4"><span class="em">🙋</span><h5>Human map</h5><p>confidence-colored review</p></div>
+    <div class="step" data-i="5"><span class="em">✅</span><h5>Validate</h5><p>typed parses · per-row reasons</p></div>
+    <div class="step" data-i="6"><span class="em">💾</span><h5>Commit</h5><p>partial success · dedup hash</p></div>
+    <div class="step" data-i="7"><span class="em">📈</span><h5>Analyze</h5><p>scope-aware dashboards</p></div>
+  </div>
+  <div class="pbar"><i id="pfill"></i></div>
+  <div class="plabel" id="plabel">ready — press play</div>
+  <div style="margin-top:14px"><button class="btn pri" id="playBtn">▶️ Play pipeline</button></div>
+</section>
+
+<!-- DASHBOARDS -->
+<section class="wrap rv" id="dashboards">
+  <div class="kicker">Dashboards</div>
+  <h2 class="sec">What the user actually sees</h2>
+  <p class="lead">Scope-aware tiles in EGP — every number below is a live query result in the real app, never a placeholder.</p>
+  <div class="dash">
+    <div class="g">
+      <h4>💰 Sales <small>this month · all branches</small></h4>
+      <div class="kpis">
+        <div class="kpi"><div class="v">184,320</div><div class="t">Revenue (EGP)</div></div>
+        <div class="kpi"><div class="v">2,417</div><div class="t">Transactions</div></div>
+        <div class="kpi"><div class="v">76.3</div><div class="t">Avg basket (EGP)</div></div>
+      </div>
+      <div class="bars"><i style="height:35%"></i><i style="height:52%"></i><i style="height:44%"></i><i style="height:68%"></i><i style="height:60%"></i><i style="height:82%"></i><i style="height:74%"></i><i style="height:95%"></i></div>
+      <div class="legend"><span><s style="background:var(--acc)"></s>Revenue over time</span></div>
+    </div>
+    <div class="g">
+      <h4>💊 Inventory &amp; waste <small>30 / 60 / 90-day watch</small></h4>
+      <div class="kpis">
+        <div class="kpi"><div class="v">1,204</div><div class="t">Units near expiry</div></div>
+        <div class="kpi"><div class="v">12.6k</div><div class="t">Waste cost (EGP)</div></div>
+        <div class="kpi"><div class="v">4.2×</div><div class="t">Turnover</div></div>
+      </div>
+      <div class="bars v2"><i style="height:70%"></i><i style="height:48%"></i><i style="height:62%"></i><i style="height:30%"></i><i style="height:55%"></i><i style="height:40%"></i><i style="height:22%"></i></div>
+      <div class="expiry">
+        <div class="row"><span>Paracetamol 500mg · Batch B-2214</span><span class="pill r">18 days</span></div>
+        <div class="row"><span>Amoxicillin 250mg · Batch A-0983</span><span class="pill a">52 days</span></div>
+        <div class="row"><span>Vitamin D3 · Batch D-0412</span><span class="pill g">84 days</span></div>
+      </div>
+    </div>
+    <div class="g">
+      <h4>🚨 Waste by product <small>top contributors</small></h4>
+      <div class="bars red"><i style="height:92%"></i><i style="height:64%"></i><i style="height:55%"></i><i style="height:41%"></i><i style="height:33%"></i><i style="height:24%"></i></div>
+      <div class="legend"><span><s style="background:var(--red)"></s>Waste cost by product</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- SECURITY -->
+<section class="wrap rv" id="security">
+  <div class="kicker">Security</div>
+  <h2 class="sec">Threats, and how they die here</h2>
+  <p class="lead">Each control below is implemented and covered by the 36-test suite — not aspirational.</p>
+  <div class="g" style="overflow-x:auto">
+  <table class="sec-table">
+    <thead><tr><th>Threat</th><th>Control</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td class="t">Cross-tenant data leakage</td><td class="c">Fail-closed PostgreSQL RLS on all 24 tenanted tables + two-role separation; isolation proven with zero app-level filtering.</td><td class="okmark">✓ blocked</td></tr>
+      <tr><td class="t">Zip bomb / memory exhaustion</td><td class="c">Decompression cap enforced before any read (default 200 MB) + upload size cap detected one byte past the limit.</td><td class="okmark">✓ capped</td></tr>
+      <tr><td class="t">Path traversal (zip-slip)</td><td class="c">All upload and zip-entry names reduced to sanitized basenames before touching disk.</td><td class="okmark">✓ neutralized</td></tr>
+      <tr><td class="t">Cross-site request forgery</td><td class="c">SameOriginGuard middleware — cross-site POSTs rejected 403 before any handler; verified live.</td><td class="okmark">✓ rejected</td></tr>
+      <tr><td class="t">Mass assignment</td><td class="c">Write allow-list per entity; non-editable columns like association_id are refused server-side.</td><td class="okmark">✓ refused</td></tr>
+      <tr><td class="t">Forgeable session cookies</td><td class="c">Pydantic validator refuses the shipped DEV_SECRET_KEY outside development.</td><td class="okmark">✓ refused boot</td></tr>
+      <tr><td class="t">Privilege escalation</td><td class="c">Deny-by-default per-route role matrix, five roles, deliberate negative tests per role.</td><td class="okmark">✓ denied</td></tr>
+      <tr><td class="t">Silent data corruption</td><td class="c">Append-only audit log; edits logged pre-commit, reverts write new entries — history is never erased.</td><td class="okmark">✓ traceable</td></tr>
+      <tr><td class="t">Duplicate revenue</td><td class="c">SHA-256 content-hash dataset dedup + transaction_ref-level dedup counting.</td><td class="okmark">✓ blocked</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- LIMITS -->
+<section class="wrap rv" id="limits">
+  <div class="kicker">Honest limits</div>
+  <h2 class="sec">What we do <span style="color:var(--amber)">not</span> yet guarantee</h2>
+  <p class="lead">A showcase that hides its gaps is marketing, not engineering. From SECURITY_SPEC.md, verbatim in spirit:</p>
+  <div class="limits">
+    <div class="limit"><h5>⏳ No login rate limiting yet</h5><p>Brute-force protection is on the backlog — the same-origin guard does not throttle repeated attempts.</p></div>
+    <div class="limit"><h5>🔒 No encryption at rest</h5><p>Disk-level encryption is deferred to deployment infrastructure, not handled in-app.</p></div>
+    <div class="limit"><h5>💾 No backups / DR story</h5><p>Raw-file bronze storage is local-disk only; object storage migration is planned past ~50–100 GB.</p></div>
+    <div class="limit"><h5>🔓 Proxy-awareness caveat</h5><p>CSRF compares against the Host header; X-Forwarded-Host support is needed behind reverse proxies.</p></div>
+    <div class="limit"><h5>🧱 No high availability</h5><p>Single-node design by intent for pilot scale; HA is a post-pilot concern.</p></div>
+    <div class="limit"><h5>📉 Analytics UI pending</h5><p>Nine analytics engines are implemented in the service layer; dedicated routes/templates are the next phase.</p></div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="in">
+    <div class="stack" style="flex:1;min-width:280px">
+      <div class="stk"><b>Backend</b>FastAPI · Python 3.12</div>
+      <div class="stk"><b>Database</b>PostgreSQL 16 + PostGIS</div>
+      <div class="stk"><b>Frontend</b>Jinja2 · HTMX · Bootstrap RTL</div>
+      <div class="stk"><b>Data</b>pandas · openpyxl · rapidfuzz</div>
+      <div class="stk"><b>Auth</b>bcrypt · signed sessions</div>
+      <div class="stk"><b>Ops</b>Docker Compose · Alembic · Make</div>
+    </div>
+  </div>
+  <div class="in" style="margin-top:22px">
+    <span>SiroQ — multi-tenant pharmacy analytics · commit <code class="mk" data-copy="17227a3">17227a3</code> · 36/36 tests green</span>
+    <span>Built with zero external dependencies — this page included.</span>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+  var $=function(s,c){return (c||document).querySelector(s)}, $$=function(s,c){return Array.prototype.slice.call((c||document).querySelectorAll(s))};
+
+  /* theme */
+  var tbtn=$("#themeBtn"), root=document.documentElement;
+  try{ if(localStorage.getItem("sq-theme")==="light"){root.setAttribute("data-theme","light"); tbtn.textContent="☀️";} }catch(e){}
+  tbtn.addEventListener("click",function(){
+    var light=root.getAttribute("data-theme")==="light";
+    if(light){root.removeAttribute("data-theme"); tbtn.textContent="🌙";} else {root.setAttribute("data-theme","light"); tbtn.textContent="☀️";}
+    try{localStorage.setItem("sq-theme", light?"dark":"light");}catch(e){}
+  });
+
+  /* reveal + counters + bars */
+  var counted=false;
+  function countUp(el){
+    var target=parseInt(el.getAttribute("data-n"),10), t0=null, dur=1200;
+    function tick(t){ if(!t0)t0=t; var p=Math.min((t-t0)/dur,1); p=1-Math.pow(1-p,3);
+      el.textContent=Math.round(target*p); if(p<1)requestAnimationFrame(tick); }
+    requestAnimationFrame(tick);
+  }
+  var io=new IntersectionObserver(function(es){
+    es.forEach(function(e){
+      if(e.isIntersecting){
+        e.target.classList.add("on");
+        if(!counted && e.target.querySelector("#stats")){ counted=true; $$("#stats .n").forEach(countUp); }
+        io.unobserve(e.target);
+      }
+    });
+  },{threshold:.12});
+  $$(".rv").forEach(function(el){io.observe(el)});
+
+  /* tabs */
+  $$("#tabs .tab").forEach(function(t){
+    t.addEventListener("click",function(){
+      $$("#tabs .tab").forEach(function(x){x.classList.remove("on")});
+      t.classList.add("on");
+      $$(".panel").forEach(function(p){p.classList.remove("on")});
+      $("#"+t.getAttribute("data-t")).classList.add("on");
+      if($("#q").value) applyFilter($("#q").value);
+    });
+  });
+
+  /* search across all panels */
+  var nores=$("#nores");
+  function applyFilter(v){
+    v=v.trim().toLowerCase(); var total=0;
+    $$(".panel").forEach(function(p){
+      var hits=0;
+      $$(".f",p).forEach(function(f){
+        var match=!v || (f.getAttribute("data-k")+" "+f.textContent).toLowerCase().indexOf(v)>-1;
+        f.style.display=match?"":"none"; if(match)hits++;
+      });
+      if(v) p.classList.toggle("on", hits>0); total+=hits;
+    });
+    nores.style.display=(v && total===0)?"block":"none";
+    if(!v){
+      $$(".panel").forEach(function(p){p.classList.remove("on")});
+      var active=$("#tabs .tab.on"); if(active) $("#"+active.getAttribute("data-t")).classList.add("on");
+    }
+  }
+  $("#q").addEventListener("input",function(){applyFilter(this.value)});
+
+  /* pipeline autoplay + click */
+  var steps=$$(".step"), cur=-1, timer=null, fill=$("#pfill"), plabel=$("#plabel");
+  var notes=["reading file…","enforcing caps — threats stop here ⚠️","archiving to immutable bronze","scoring headers + content 🧠","waiting for human confirm ✋","validating rows — failures get reasons","committing — dedup hash checked","serving dashboards 📈"];
+  function show(i){
+    cur=i; steps.forEach(function(s,j){s.classList.toggle("on",j<=i)});
+    fill.style.width=((i+1)/steps.length*100)+"%";
+    plabel.textContent=notes[i];
+  }
+  steps.forEach(function(s){ s.addEventListener("click",function(){ stop(); show(parseInt(s.getAttribute("data-i"),10)); }); });
+  function stop(){ if(timer){clearInterval(timer);timer=null; $("#playBtn").textContent="▶️ Play pipeline";} }
+  $("#playBtn").addEventListener("click",function(){
+    if(timer){stop();return;}
+    this.textContent="⏸ Pause"; cur=-1; fill.style.width="0";
+    timer=setInterval(function(){ if(cur>=steps.length-1){stop();return;} show(cur+1); },700);
+  });
+
+  /* copy chips */
+  $$("code.mk[data-copy]").forEach(function(c){
+    c.addEventListener("click",function(){
+      var done=function(){ var old=c.textContent; c.textContent="✓ copied!"; setTimeout(function(){c.textContent=old;},1200); };
+      if(navigator.clipboard) navigator.clipboard.writeText(c.getAttribute("data-copy")).then(done,done);
+      else done();
+    });
+  });
+})();
+</script>
+</body>
+</html>
