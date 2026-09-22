@@ -10,6 +10,8 @@ from typing import Any
 
 import pandas as pd
 
+from app.analytics_service.registry import file_readers
+
 
 @dataclass
 class IngestedFile:
@@ -26,63 +28,91 @@ class IngestedFile:
     notes: list[str] = None  # structural notes (e.g. report-table discovery)
 
 
+@dataclass
+class ReaderResult:
+    """What a registered file reader produces for a ``read_file`` pass."""
+    sheets: dict[str, pd.DataFrame]
+    notes: list[str] = None
+
+
+# Supported extensions -> registered reader name.
+_EXT_TO_TYPE = {
+    ".csv": "csv",
+    ".xlsx": "excel",
+    ".xls": "excel",
+    ".json": "json",
+    ".jsonl": "json",
+}
+
+
 def detect_file_type(filename: str) -> str:
     """Detect file type from extension."""
     ext = Path(filename).suffix.lower()
-    if ext in {".csv"}:
-        return "csv"
-    if ext in {".xlsx", ".xls"}:
-        return "excel"
-    if ext in {".json", ".jsonl"}:
-        return "json"
-    raise ValueError(f"Unsupported file type: {ext}")
+    file_type = _EXT_TO_TYPE.get(ext)
+    if file_type is None:
+        raise ValueError(f"Unsupported file type: {ext}")
+    return file_type
+
+
+@file_readers.register("csv", description="Comma-separated values.")
+def _read_csv_source(content: bytes) -> ReaderResult:
+    df = pd.read_csv(io.BytesIO(content))
+    return ReaderResult({"default": df}, [])
+
+
+@file_readers.register("excel", description="Excel workbook (.xlsx/.xls).")
+def _read_excel_source(content: bytes) -> ReaderResult:
+    # Calamine reads exported workbooks whose style sheets are invalid per
+    # OOXML (Crystal Reports writes font family > 14); openpyxl's stylesheet
+    # parser rejects them wholesale, calamine ignores styles.
+    raw_sheets = pd.read_excel(io.BytesIO(content), sheet_name=None, engine="calamine")
+    sheet_frames: dict[str, pd.DataFrame] = {}
+    notes: list[str] = []
+    for sheet_name, sheet_df in raw_sheets.items():
+        extracted, sheet_notes = _extract_report_table(sheet_df)
+        sheet_frames[sheet_name] = extracted
+        notes.extend(f"{sheet_name}: {n}" for n in sheet_notes)
+    return ReaderResult(sheet_frames, notes)
+
+
+@file_readers.register("json", description="JSON object, array of objects, or JSONL.")
+def _read_json_source(content: bytes) -> ReaderResult:
+    try:
+        data = json.loads(content.decode("utf-8"))
+        if isinstance(data, list):
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            df = pd.DataFrame([data])
+        else:
+            raise ValueError("JSON must be an array of objects or a single object")
+    except json.JSONDecodeError:
+        # Try JSONL
+        lines = content.decode("utf-8").strip().split("\n")
+        records = [json.loads(line) for line in lines if line.strip()]
+        df = pd.DataFrame(records)
+    return ReaderResult({"default": df}, [])
 
 
 def read_file(content: bytes, filename: str) -> IngestedFile:
     """Read a file and return an IngestedFile with all sheets/dataframes."""
     file_type = detect_file_type(filename)
-    errors = []
-    notes = []
-
-    try:
-        if file_type == "csv":
-            df = pd.read_csv(io.BytesIO(content))
-            sheets = {"default": df}
-        elif file_type == "excel":
-            # Calamine reads exported workbooks whose style sheets are invalid
-            # per OOXML (Crystal Reports writes font family > 14); openpyxl's
-            # stylesheet parser rejects them wholesale, calamine ignores styles.
-            raw_sheets = pd.read_excel(
-                io.BytesIO(content), sheet_name=None, engine="calamine"
-            )
-            sheet_frames = {}
-            for sheet_name, sheet_df in raw_sheets.items():
-                extracted, sheet_notes = _extract_report_table(sheet_df)
-                sheet_frames[sheet_name] = extracted
-                notes.extend(f"{sheet_name}: {n}" for n in sheet_notes)
-            sheets = sheet_frames
-            df = list(sheets.values())[0] if sheets else pd.DataFrame()
-        elif file_type == "json":
-            try:
-                data = json.loads(content.decode("utf-8"))
-                if isinstance(data, list):
-                    df = pd.DataFrame(data)
-                elif isinstance(data, dict):
-                    df = pd.DataFrame([data])
-                else:
-                    raise ValueError("JSON must be an array of objects or a single object")
-            except json.JSONDecodeError:
-                # Try JSONL
-                lines = content.decode("utf-8").strip().split("\n")
-                records = [json.loads(line) for line in lines if line.strip()]
-                df = pd.DataFrame(records)
-            sheets = {"default": df}
-        else:
-            raise ValueError(f"Unsupported file type: {file_type}")
-    except Exception as e:
-        errors.append(f"Failed to read file: {e}")
+    errors: list[str] = []
+    notes: list[str] = []
+    reader = file_readers.get(file_type)
+    if reader is None:
+        errors.append(f"Failed to read file: unknown file type {file_type!r}")
         df = pd.DataFrame()
-        sheets = {}
+        sheets: dict[str, pd.DataFrame] = {}
+    else:
+        try:
+            result = reader(content)
+            sheets = result.sheets or {}
+            notes = list(result.notes or [])
+            df = list(sheets.values())[0] if sheets else pd.DataFrame()
+        except Exception as e:
+            errors.append(f"Failed to read file: {e}")
+            df = pd.DataFrame()
+            sheets = {}
 
     # Normalize column names
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]

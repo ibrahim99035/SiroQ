@@ -10,6 +10,8 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
+from app.analytics_service import forecast as forecast_engine
+from app.analytics_service.preview import build_series, infer_columns, pick_date_column, pick_value_column, preview
 from app.analytics_service.reporting import build_report_model
 from app.analytics_service.storage import read_bytes
 from app.database import get_db
@@ -144,3 +146,143 @@ def download_file(file_id: str, db: Session = Depends(get_db)):
             "X-SHA256": stored.sha256,
         },
     )
+
+
+def _stored_or_404(file_id: str, db: Session) -> StoredFile:
+    if not _parse_uuid(file_id):
+        raise HTTPException(status_code=404, detail="File not found")
+    stored = db.get(StoredFile, file_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return stored
+
+
+@router.get("/files/{file_id}/preview", summary="Data-source preview: columns + sample rows")
+def file_preview(
+    file_id: str,
+    sheet: str | None = Query(None, description="Sheet name or 0-based index for Excel files"),
+    rows: int = Query(25, ge=1, le=200, description="Rows per page"),
+    offset: int = Query(0, ge=0, description="Row offset for pagination"),
+    db: Session = Depends(get_db),
+):
+    """Introspect a stored raw file live: dtypes, columns, and (paged) rows.
+
+    Unlike the persisted analysis report, this always reflects the exact bytes
+    on disk (which sheet to read is selectable for multi-sheet workbooks).
+    """
+    stored = _stored_or_404(file_id, db)
+    try:
+        return preview(stored, sheet=sheet, rows=rows, offset=offset)
+    except Exception as exc:  # defensive: bad bytes must not 500
+        raise HTTPException(status_code=400, detail=f"Could not read file: {exc}")
+
+
+@router.get("/files/{file_id}/series", summary="Build a daily time series from a stored file")
+def file_series(
+    file_id: str,
+    sheet: str | None = Query(None, description="Sheet name or 0-based index for Excel files"),
+    date_col: str | None = Query(None, description="Date column (autodetected when omitted)"),
+    value_col: str | None = Query(None, description="Numeric value column (autodetected)"),
+    agg: str = Query("sum", pattern="^(sum|mean|count)$"),
+    db: Session = Depends(get_db),
+):
+    """Aggregate any date+value columns of a stored file into a daily series."""
+    stored = _stored_or_404(file_id, db)
+    try:
+        from app.analytics_service.preview import load_file, select_frame
+
+        ing = load_file(stored)
+        df, sheet_label = select_frame(ing, sheet)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read file: {exc}")
+    if df.empty:
+        raise HTTPException(status_code=400, detail="No rows available in this file/sheet.")
+
+    date_column = pick_date_column(df, date_col or None)
+    if date_column is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No date/time column found. Forecasting needs a date column.",
+        )
+    value_column = pick_value_column(df, value_col or None)
+    if value_column is None:
+        agg = "count"
+    series, meta = build_series(df, date_column, value_column, agg)
+    if not series:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not build a series: no parseable dates in the selected column.",
+        )
+    meta.update({
+        "file_id": file_id,
+        "filename": stored.original_filename,
+        "sheet": sheet_label,
+        "sheets": list(ing.sheets),
+    })
+    return {"series": series, "meta": meta, "columns": infer_columns(df)}
+
+
+@router.get("/files/{file_id}/forecast", summary="Pure statistical forecast over a stored file")
+def file_forecast(
+    file_id: str,
+    sheet: str | None = Query(None, description="Sheet name or 0-based index for Excel files"),
+    date_col: str | None = Query(None, description="Date column (autodetected when omitted)"),
+    value_col: str | None = Query(None, description="Numeric value column (autodetected)"),
+    agg: str = Query("sum", pattern="^(sum|mean|count)$"),
+    horizon: int = Query(14, ge=1, le=365, description="Forecast horizon in days"),
+    confidence: float = Query(0.90, gt=0, lt=1, description="Prediction-interval confidence"),
+    db: Session = Depends(get_db),
+):
+    """Non-AI forecasting over the live data source (no persisted analysis).
+
+    Classical statistical methods only (naive / moving average / linear trend /
+    weekly seasonality / damped Holt), method chosen by a holdout, plus a
+    prediction band — fully deterministic and reproducible.
+    """
+    stored = _stored_or_404(file_id, db)
+    try:
+        from app.analytics_service.preview import load_file, select_frame
+
+        ing = load_file(stored)
+        df, sheet_label = select_frame(ing, sheet)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read file: {exc}")
+    if df.empty:
+        raise HTTPException(status_code=400, detail="No rows available in this file/sheet.")
+
+    date_column = pick_date_column(df, date_col or None)
+    if date_column is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No date/time column found. Forecasting needs a date column.",
+        )
+    value_column = pick_value_column(df, value_col or None)
+    if value_column is None:
+        agg = "count"
+    series, meta = build_series(df, date_column, value_column, agg)
+    if not series:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not build a series: no parseable dates in the selected column.",
+        )
+    if len(series) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Need at least two dates of history to forecast.",
+        )
+
+    result = forecast_engine.forecast(
+        [p["value"] for p in series],
+        dates=[p["date"] for p in series],
+        horizon=horizon,
+        confidence=confidence,
+    )
+    meta.update({
+        "file_id": file_id,
+        "filename": stored.original_filename,
+        "sheet": sheet_label,
+        "sheets": list(ing.sheets),
+    })
+    result["meta"] = meta
+    result["method_description"] = forecast_engine.describe(result.get("method"))
+    return result

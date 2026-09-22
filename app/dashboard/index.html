@@ -13,12 +13,37 @@
     <span><strong>SiroQ</strong> Analysis Dashboard</span>
   </div>
   <div class="top-actions">
+    <button id="newAppBtn" class="btn">New application</button>
+    <button id="addFilesBtn" class="btn" disabled>Add files</button>
     <button id="reloadBtn" class="btn">Reload</button>
     <button id="openReportBtn" class="btn primary" disabled>Open printable report</button>
     <button id="dlJsonBtn" class="btn" disabled>Download JSON</button>
     <button id="keyBtn" class="btn ghost">API key</button>
   </div>
 </header>
+
+<div id="appModal" class="modal-backdrop" hidden>
+  <div class="modal">
+    <h3 id="appModalTitle">New application</h3>
+    <p class="modal-note" id="appModalNote">
+      Give the application a name. Optionally attach files — they are uploaded
+      and analyzed immediately (the analysis then shows here).
+    </p>
+    <label class="modal-field">Application name
+      <input id="appNameInput" type="text" placeholder="e.g. North pharmacy" autocomplete="off" spellcheck="false">
+    </label>
+    <label class="modal-field">Files
+      <input id="appFilesInput" type="file" multiple
+             accept=".csv,.tsv,.txt,text/csv,text/plain,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+    </label>
+    <div id="appFilesStatus" class="app-files-status"></div>
+    <div id="appModalMsg" class="key-msg"></div>
+    <div class="modal-actions">
+      <button id="appCreateBtn" class="btn primary">Create application</button>
+      <button id="appCancelBtn" class="btn ghost">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <div id="keyModal" class="modal-backdrop" hidden>
   <div class="modal">

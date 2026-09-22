@@ -57,9 +57,14 @@
     const MAXL = Math.floor(labelW / 6.2);
     items.forEach(function (it, i) {
       const y = pad + i * rowH;
-      const len = Math.max(0, Math.min(100, Number(it.pct) || 0)) / 100 * chartW;
+      let pct = (it.pct !== undefined && it.pct !== null) ? Number(it.pct) : 0;
+      if (!pct && Number(it.value) > 0) {
+        const maxv = opts.max || (items.reduce(function (s, x) { return Math.max(s, Number(x.value) || 0); }, 0));
+        if (maxv > 0) pct = Math.max(0, Math.min(100, (Number(it.value) / maxv) * 100));
+      }
+      const len = Math.max(0, Math.min(100, pct || 0)) / 100 * chartW;
       const t = svgEl("text", { x: 0, y: y + 12, class: "clbl", "text-anchor": "start" });
-      const full = it.label;
+      const full = (it.label === undefined || it.label === null) ? "" : String(it.label);
       t.textContent = full.length > MAXL ? full.slice(0, MAXL - 1) + "…" : full;
       if (full.length > MAXL) t.title = full;
       svg.appendChild(t);
@@ -249,5 +254,86 @@
     container.appendChild(svg);
   }
 
-  window.SiroqCharts = { hBar: hBar, vBars: vBars, line: line, donut: donut, gauge: gauge, color: color, esc: esc, fmt: fmt };
+  function forecastChart(container, payload, opts) {
+    opts = opts || {};
+    const hist = (payload.series || []).slice();
+    const fcst = (payload.forecast || []).slice();
+    const H = 220;
+    const w = container.clientWidth || 600;
+    clear(container);
+    if (!hist.length || !fcst.length) { container.innerHTML = '<span class="muted">no forecast data</span>'; return; }
+    const top = 18, bottom = 36, left = 6, right = 10;
+    const chartW = w - left - right;
+    const chartH = H - top - bottom;
+    const dateOf = function (d) { return String(d).slice(0, 10); };
+    const hv = hist.map(function (p) { return Number(p.value); });
+    const fv = fcst.map(function (p) { return Number(p.value); });
+    let mx = Math.max.apply(null, hv.concat(fv));
+    let mn = Math.min.apply(null, hv.concat(fv));
+    if (mn >= 0) { mn = 0; mx = mx * 1.08 || 1; }
+    if (mx === mn) { mx = mn + 1; }
+    const total = hist.length + fcst.length;
+    const x = function (i) { return left + (total === 1 ? chartW / 2 : (i / (total - 1)) * chartW); };
+    const y = function (v) { return top + chartH - ((v - mn) / (mx - mn)) * chartH; };
+    const svg = newSvg(w, H);
+
+    // confidence-interval band (drawn first, under the lines)
+    const b0i = hist.length - 1;
+    const b0y = y(hv[hv.length - 1]);
+    let band = "M" + x(b0i).toFixed(1) + " " + b0y.toFixed(1);
+    fcst.forEach(function (p, i) {
+      band += " L" + x(hist.length + i).toFixed(1) + " " + y(Math.max(mn, Number(p.upper) || b0y)).toFixed(1);
+    });
+    for (var i = fcst.length - 1; i >= 0; i--) {
+      const p = fcst[i];
+      band += " L" + x(hist.length + i).toFixed(1) + " " + y(Math.max(mn, Number(p.lower) || b0y)).toFixed(1);
+    }
+    band += " L" + x(b0i).toFixed(1) + " " + b0y.toFixed(1) + " Z";
+    svg.appendChild(svgEl("path", { d: band, class: "fcst-band" }));
+
+    // boundary divider between history and forecast
+    svg.appendChild(svgEl("line", {
+      x1: x(b0i).toFixed(1), y1: top, x2: x(b0i).toFixed(1), y2: top + chartH,
+      class: "fcst-divider",
+    }));
+
+    // history line
+    let hpath = "";
+    hist.forEach(function (p, i) {
+      hpath += (i ? " L" : "M") + x(i).toFixed(1) + " " + y(p.value).toFixed(1);
+      const c = svgEl("circle", { cx: x(i).toFixed(1), cy: y(p.value).toFixed(1), r: 2.2 });
+      const t = svgEl("title");
+      t.textContent = dateOf(p.date) + ": " + fmt(p.value);
+      c.appendChild(t);
+      svg.appendChild(c);
+    });
+    svg.appendChild(svgEl("path", { d: hpath, class: "cpath" }));
+
+    // forecast line (dashed)
+    let fpath = "M" + x(b0i).toFixed(1) + " " + b0y.toFixed(1);
+    fcst.forEach(function (p, i) {
+      fpath += " L" + x(hist.length + i).toFixed(1) + " " + y(p.value).toFixed(1);
+      const c = svgEl("circle", { cx: x(hist.length + i).toFixed(1), cy: y(p.value).toFixed(1), r: 2.2, class: "fcst-dot" });
+      const t = svgEl("title");
+      t.textContent = dateOf(p.date) + " (step " + p.step + "): " + fmt(p.value) +
+        "  [" + fmt(p.lower) + " .. " + fmt(p.upper) + "]";
+      c.appendChild(t);
+      svg.appendChild(c);
+    });
+    svg.appendChild(svgEl("path", { d: fpath, class: "fcst-path" }));
+
+    // axis labels: first, last, and a couple in between
+    const idxs = [0, Math.floor(hist.length / 2), hist.length - 1, hist.length + fcst.length - 1];
+    idxs.forEach(function (i) {
+      const d = i < hist.length ? hist[i].date : fcst[i - hist.length].date;
+      const t = svgEl("text", { x: x(i).toFixed(1), y: H - 12, class: "clbl", "text-anchor": "middle" });
+      t.textContent = dateOf(d);
+      svg.appendChild(t);
+    });
+    // baseline
+    svg.appendChild(svgEl("line", { x1: left, y1: y(mn).toFixed(1), x2: w - right, y2: y(mn).toFixed(1), class: "caxis" }));
+    container.appendChild(svg);
+  }
+
+  window.SiroqCharts = { hBar: hBar, vBars: vBars, line: line, donut: donut, gauge: gauge, forecast: forecastChart, color: color, esc: esc, fmt: fmt };
 })();

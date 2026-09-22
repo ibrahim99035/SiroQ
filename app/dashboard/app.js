@@ -14,6 +14,9 @@
     analysisId: null,
   };
 
+  const PREVIEW_PAGE_ROWS = 50;
+  const CELL_CLIP = 400;
+
   const $ = function (id) { return document.getElementById(id); };
   const esc = C.esc;
 
@@ -63,6 +66,93 @@
     if (btn) btn.addEventListener("click", function () { openKeyModal(); });
   }
 
+  /* ---------- create application / add files (modal) ---------- */
+
+  let appModalMode = "create";
+
+  function openCreateModal() {
+    appModalMode = "create";
+    $("appModalTitle").textContent = "New application";
+    $("appModalNote").textContent =
+      "Give the application a name. Optionally attach files — they are uploaded " +
+      "and analyzed immediately (the analysis then shows here).";
+    $("appNameInput").hidden = false;
+    var lbl = $("appNameInput").closest("label");
+    lbl.hidden = false;
+    $("appCreateBtn").textContent = "Create application";
+    $("appFilesStatus").textContent = "";
+    $("appModalMsg").textContent = "";
+    $("appFilesInput").value = "";
+    $("appNameInput").value = "";
+    $("appModal").hidden = false;
+    $("appNameInput").focus();
+  }
+
+  function openAddFilesModal() {
+    if (!state.appId) return;
+    appModalMode = "addfiles";
+    $("appModalTitle").textContent = "Add files";
+    $("appModalNote").textContent =
+      "Choose files to upload. A new analysis is run automatically " +
+      "over all files in this application.";
+    var lbl = $("appNameInput").closest("label");
+    lbl.hidden = true;
+    $("appNameInput").hidden = true;
+    $("appCreateBtn").textContent = "Upload & analyze";
+    $("appFilesStatus").textContent = "";
+    $("appModalMsg").textContent = "";
+    $("appFilesInput").value = "";
+    $("appModal").hidden = false;
+    $("appFilesInput").focus();
+  }
+
+  function closeAppModal() {
+    $("appModal").hidden = true;
+  }
+
+  async function submitAppModal() {
+    const createBtn = $("appCreateBtn");
+    const msg = $("appModalMsg");
+    const files = Array.prototype.slice.call($("appFilesInput").files || []);
+    const name = $("appNameInput").value.trim();
+    if (appModalMode === "create" && !name) {
+      msg.textContent = "An application name is required.";
+      return;
+    }
+    if (appModalMode === "addfiles" && !files.length) {
+      msg.textContent = "Choose at least one file to upload.";
+      return;
+    }
+    createBtn.disabled = true;
+    msg.textContent = "Working…";
+    try {
+      let res;
+      if (appModalMode === "addfiles") {
+        const fd = new FormData();
+        files.forEach(function (f) { fd.append("files", f); });
+        res = await api("/api/v1/applications/" + state.appId + "/files", { method: "POST", body: fd });
+      } else if (files.length) {
+        const fd = new FormData();
+        fd.append("application_name", name);
+        files.forEach(function (f) { fd.append("files", f); });
+        res = await api("/api/v1/analyze", { method: "POST", body: fd });
+      } else {
+        res = await api("/api/v1/applications", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name }),
+        });
+      }
+      closeAppModal();
+      await boot();
+      const appId = res.analysis_id ? res.application_id : res.id;
+      if (appId) selectApp(appId);
+    } catch (e) {
+      createBtn.disabled = false;
+      msg.textContent = "Failed: " + e.message;
+    }
+  }
+
   /* ---------- navigation ---------- */
 
   async function boot() {
@@ -72,9 +162,11 @@
       state.apps = data.applications || [];
       renderAppNav();
       if (state.apps.length) selectApp(state.apps[0].id);
-      else $("emptyBanner").innerHTML =
-        "No applications yet. Upload files via <code>POST /api/v1/analyze</code> " +
-        "or <code>POST /api/v1/applications/&lt;id&gt;/files</code>.";
+      else {
+        $("addFilesBtn").disabled = true;
+        $("emptyBanner").innerHTML =
+          "No applications yet. Use <b>New application</b> above to create one.";
+      }
     } catch (e) { fail(e); }
   }
 
@@ -89,7 +181,7 @@
       el.innerHTML =
         '<div class="app-name">' + esc(a.name) + "</div>" +
         '<div class="app-sub">' + a.file_count + " file" + (a.file_count === 1 ? "" : "s") +
-        " · " + a.analysis_count + " analysis" + (a.analysis_count === 1 ? "" : "es") +
+        " · " + a.analysis_count + (a.analysis_count === 1 ? " analysis" : " analyses") +
         "</div>" +
         (dq !== null ? '<div class="app-dq dq-' + dqClass(dq) + '">' + dq + "</div>" : "");
       el.addEventListener("click", function () { selectApp(a.id); });
@@ -107,6 +199,7 @@
     state.appId = id;
     state.analysis = null;
     state.analysisId = null;
+    $("addFilesBtn").disabled = false;
     renderAppNav();
     try {
       state.appDetail = await api("/api/v1/applications/" + id);
@@ -114,7 +207,8 @@
       renderAnalysesNav();
       const list = analysisList();
       if (list.length) selectAnalysis(list[0].id);
-      else $("mainContent").innerHTML = '<div class="empty">No analyses yet for this application.</div>';
+      else $("emptyBanner").innerHTML =
+        '<div class="empty">No analyses yet for this application — use <b>Add files</b> to upload and analyze.</div>';
     } catch (e) { fail(e); }
   }
 
@@ -161,12 +255,17 @@
 
   function renderTrend() {
     const box = $("trendBox");
-    const list = analysisList().slice(0, 30).reverse();
+    const all = analysisList().slice(0, 30).reverse();
+    const list = all.filter(function (a) { return a.summary; });
+    if (list.length < 2) {
+      box.innerHTML = '<div class="muted">Add more analyses over time to see trends here.</div>';
+      return;
+    }
     const quality = list.map(function (a) {
-      return { label: fmtWhen(a.created_at), value: a.summary && a.summary.data_quality_score };
+      return { label: fmtWhen(a.created_at), value: a.summary.data_quality_score };
     }).filter(function (p) { return p.value !== null && p.value !== undefined; });
     const rows = list.map(function (a) {
-      return { label: fmtWhen(a.created_at), value: a.summary ? (a.summary.total_rows || 0) : 0 };
+      return { label: fmtWhen(a.created_at), value: a.summary.total_rows || 0 };
     });
     let html = "";
     if (quality.length) {
@@ -177,7 +276,13 @@
     }
     box.innerHTML = html || '<div class="muted">Upload more files and re-run analysis to see trends.</div>';
     if (quality.length) C.line($("trendQ"), quality);
-    if (rows.length) C.hBar($("trendR"), rows.map(function (r) { return { label: r.label, value: r.value }; }));
+    if (rows.length) {
+      const maxR = rows.reduce(function (s, r) { return Math.max(s, Number(r.value) || 0); }, 0);
+      C.hBar($("trendR"), rows.map(function (r) {
+        const v = Number(r.value) || 0;
+        return { label: r.label, value: v, pct: maxR ? Math.max(0, Math.min(100, (v / maxR) * 100)) : 0 };
+      }), { max: maxR });
+    }
   }
 
   /* ---------- full analysis charts ---------- */
@@ -195,6 +300,7 @@
 
   function renderMain() {
     const analysis = state.analysis;
+    $("emptyBanner").innerHTML = "";
     renderTrend();
     const r = analysis.report || {};
     const s = analysis.summary || {};
@@ -205,8 +311,11 @@
 
   function renderSummary(s, r) {
     const box = $("summaryBox");
-    const cats = Array.isArray(s.categories_detected) ? s.categories_detected : [];
-    const catItems = cats.map(function (k) { return { label: k, value: 1 }; });
+    const catsObj = (s.categories_detected && typeof s.categories_detected === "object" && !Array.isArray(s.categories_detected))
+      ? s.categories_detected : {};
+    const catItems = Array.isArray(s.categories_detected)
+      ? s.categories_detected.map(function (k) { return { label: k, value: 1 }; })
+      : Object.keys(catsObj).map(function (k) { return { label: k, value: (catsObj[k] || []).length }; });
     const html =
       kpi("Files", s.file_count) +
       kpi("Total rows", fmtRows(s.total_rows)) +
@@ -240,19 +349,21 @@
 
   function fileHeader(f, idx) {
     const tag = f.top_category ? '<span class="tag tag-' + esc(f.top_category) + '">' + esc(f.top_category) + "</span>" : "";
+    const size = f.size_bytes ? " · " + fmtBytes(f.size_bytes) : "";
+    const sha = f.sha256 ? '<span class="file-sha" title="sha256 ' + esc(f.sha256) + '">' + esc(f.sha256.slice(0, 8)) + "</span>" : "";
     const notes = (f.notes || []).map(function (n) { return "<div class='note'>" + esc(n) + "</div>"; }).join("");
     return '<div class="file-head">' +
       "<h4>" + (idx + 1) + ". " + esc(f.filename) + "</h4>" +
       '<span class="file-meta">' + esc(f.file_type || "") + " · " + fmtRows(f.row_count) + " rows · " +
-      (f.columns ? f.columns.length : 0) + " cols" + (f.multi_sheet ? " · multi-sheet" : "") + "</span>" +
-      '<span class="file-tags">' + tag + "</span>" +
+      (f.columns ? f.columns.length : 0) + " cols" + size + (f.multi_sheet ? " · multi-sheet" : "") + "</span>" +
+      '<span class="file-tags">' + tag + sha + "</span>" +
       '<div class="file-notes">' + notes + "</div>" +
       "</div>";
   }
 
   function fileDetail(f) {
     const wrap = document.createElement("div");
-    wrap.appendChild(sectionHtml("File summary", fileSummaryGrid(f)));
+
     const grid = document.createElement("div");
     grid.className = "charts-grid";
     grid.appendChild(block("Category probability", f.categories, "barrel"));
@@ -262,42 +373,315 @@
     const domainEl = domainSection(f);
     if (domainEl) wrap.appendChild(domainEl);
 
+    const acc = document.createElement("details");
+    acc.className = "col-profile";
+    acc.innerHTML = "<summary>Column profiles</summary>";
+    const ab = document.createElement("div");
+    ab.className = "acc-body";
+    ab.appendChild(sectionHtml("Column profile", ""));
     const pgrid = document.createElement("div");
     pgrid.className = "charts-grid";
-    wrap.appendChild(sectionHtml("Column profile", ""));
     pgrid.appendChild(block("Null share", null, "nulls", f));
     pgrid.appendChild(block("Unique share", null, "uniques", f));
-    wrap.appendChild(pgrid);
-    wrap.appendChild(numberProfile(f));
-    wrap.appendChild(categoricalProfile(f));
+    ab.appendChild(pgrid);
+    const numProf = numberProfile(f);
+    const catProf = categoricalProfile(f);
+    if (numProf) ab.appendChild(numProf);
+    if (catProf) ab.appendChild(catProf);
+    acc.appendChild(ab);
+    wrap.appendChild(acc);
 
     const details = document.createElement("details");
     details.className = "rawjson";
     details.innerHTML = "<summary>Raw report JSON</summary><pre>" + esc(JSON.stringify(f, null, 2)) + "</pre>";
     wrap.appendChild(details);
+
+    const tools = dataTools(f);
+    if (tools) wrap.appendChild(tools);
     return wrap;
+  }
+
+  /* ---------- data preview + forecast tools ---------- */
+
+  function dataTools(f) {
+    const fid = f.file_id || f.id;
+    if (!fid) return null;
+    const details = document.createElement("details");
+    details.className = "data-tools";
+    details.innerHTML =
+      '<summary>Data sources &amp; forecast</summary>' +
+      '<div class="dt-loading">Loading live preview…</div>';
+    details.addEventListener("toggle", function () {
+      if (details.open && !details.dataset.loaded) {
+        details.dataset.loaded = "1";
+        setupDataTools(details, fid);
+      }
+    });
+    return details;
+  }
+
+  async function setupDataTools(details, fid) {
+    const body = details.querySelector(".dt-loading");
+    body.classList.remove("dt-loading");
+    body.className = "dt-body";
+    let info;
+    try {
+      info = await api("/api/v1/files/" + encodeURIComponent(fid) + "/preview?rows=" + PREVIEW_PAGE_ROWS);
+    } catch (e) {
+      body.innerHTML = '<div class="dt-err">Could not load preview: ' + esc(e.message) + "</div>";
+      return;
+    }
+    body.innerHTML =
+      '<div class="dt-head">' +
+      '<strong>' + esc(info.filename) + "</strong>" +
+      '<span class="dt-sub">' + esc(info.file_type) + " · " + fmtRows(info.row_count) + " rows · " +
+      esc((info.sheets && info.sheets.length) ? info.sheets.join(", ") : "") + "</span></div>" +
+      '<div class="dt-grid"><div class="dt-pane">' + previewPane(info) + "</div>" +
+      '<div class="dt-pane">' + forecastPane(info) + "</div></div>";
+    bindPreviewGrid(body, fid, info);
+    bindForecast(body, fid, info);
+  }
+
+  function previewTableHtml(info) {
+    const sample = info.sample_rows || [];
+    const cols = (info.columns || []).map(function (c) { return c.name; });
+    if (!sample.length) return '<span class="muted">no rows to preview</span>';
+    return '<div class="dt-table-wrap"><table class="dt-table"><tr>' +
+      cols.map(function (c) { return "<th>" + esc(c) + "</th>"; }).join("") + "</tr>" +
+      sample.map(function (r) {
+        return "<tr>" + cols.map(function (c) {
+          const v = r[c];
+          const full = v === null || v === undefined ? "·" : esc(String(v));
+          const cell = full.length > CELL_CLIP ? full.slice(0, CELL_CLIP) + "…" : full;
+          return '<td title="' + full + '">' + cell + "</td>";
+        }).join("") + "</tr>";
+      }).join("") + "</table></div>";
+  }
+
+  function previewPane(info) {
+    const total = Number(info.row_count || 0);
+    const offset = Number(info.offset || 0);
+    let html =
+      '<div class="dt-pane-title">Preview</div>' +
+      '<div class="dt-cols">' +
+      (info.columns || []).map(function (c) {
+        return '<span class="pill dt-col dt-kind-' + esc(c.kind) + '" title="nulls: ' + fmtRows(c.null_count) + '">' +
+          esc(c.name) + " · " + esc(c.kind) + "</span>";
+      }).join("") +
+      "</div>";
+    if ((info.sheets || []).length > 1) {
+      html += '<div class="dt-row"><label>Sheet</label><select class="dt-sheet">' +
+        info.sheets.map(function (s) {
+          return '<option' + (s === info.sheet ? " selected" : "") + ">" + esc(s) + "</option>";
+        }).join("") + "</select></div>";
+    }
+    html += previewTableHtml(info);
+    const start = Math.min(offset + 1, total);
+    const end = Math.min(offset + PREVIEW_PAGE_ROWS, total);
+    html += '<div class="dt-pager">' +
+      '<button class="btn p-prev"' + (offset <= 0 ? " disabled" : "") + ">‹ Prev</button>" +
+      '<span class="p-info">' + (total ? "Rows " + fmtRows(start) + "–" + fmtRows(end) + " of " + fmtRows(total) : "0 rows") + "</span>" +
+      '<button class="btn p-next"' + (end >= total ? " disabled" : "") + ">Next ›</button>" +
+      "</div>";
+    return html;
+  }
+
+  function bindPreviewGrid(body, fid, info) {
+    const prevBtn = body.querySelector(".p-prev");
+    const nextBtn = body.querySelector(".p-next");
+    const pager = body.querySelector(".p-info");
+    if (!pager) return;
+    const state2 = { offset: Number(info.offset || 0), rows: PREVIEW_PAGE_ROWS };
+    const tableBox = body.querySelector(".dt-table-wrap");
+
+    async function go(offset) {
+      state2.offset = Math.max(0, offset);
+      pager.textContent = "Loading…";
+      try {
+        const url = "/api/v1/files/" + encodeURIComponent(fid) + "/preview?rows=" + state2.rows +
+          "&offset=" + state2.offset +
+          ((info.sheets || []).length > 1 && info.sheet ? "&sheet=" + encodeURIComponent(info.sheet) : "");
+        const next = await api(url);
+        const total = Number(next.row_count || 0);
+        const end = Math.min(state2.offset + state2.rows, total);
+        const start = Math.min(state2.offset + 1, total);
+        tableBox.innerHTML = "";
+        tableBox.appendChild(tableElement(next));
+        pager.textContent = "Rows " + fmtRows(start) + "–" + fmtRows(end) + " of " + fmtRows(total);
+        prevBtn.disabled = state2.offset <= 0;
+        nextBtn.disabled = end >= total;
+      } catch (e) {
+        pager.textContent = "Could not load page: " + e.message;
+      }
+    }
+
+    prevBtn.addEventListener("click", function () { go(state2.offset - state2.rows); });
+    nextBtn.addEventListener("click", function () { go(state2.offset + state2.rows); });
+  }
+
+  function tableElement(info) {
+    // build a fresh <div class="dt-table-wrap"><table>… for a page payload
+    const wrap = document.createElement("div");
+    wrap.className = "dt-table-wrap";
+    const sample = info.sample_rows || [];
+    const cols = (info.columns || []).map(function (c) { return c.name; });
+    if (!sample.length) {
+      wrap.appendChild(document.createTextNode("no rows"));
+      return wrap;
+    }
+    const table = document.createElement("table");
+    table.className = "dt-table";
+    table.appendChild(rowsHtml("<tr>" + cols.map(function (c) { return "<th>" + esc(c) + "</th>"; }).join("") + "</tr>"));
+    sample.forEach(function (r) {
+      const tr = document.createElement("tr");
+      cols.forEach(function (c) {
+        const v = r[c];
+        const full = v === null || v === undefined ? "·" : esc(String(v));
+        const cellText = full.length > CELL_CLIP ? full.slice(0, CELL_CLIP) + "…" : full;
+        const td = document.createElement("td");
+        td.textContent = cellText;
+        if (full.length > CELL_CLIP) td.title = r[c];
+        tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+    wrap.appendChild(table);
+    return wrap;
+  }
+
+  function rowsHtml(html) {
+    const t = document.createElement("template");
+    t.innerHTML = html;
+    return t.content.firstChild;
+  }
+
+  function forecastPane(info) {
+    const dateCols = [];
+    const numCols = [];
+    const otherCols = [];
+    (info.columns || []).forEach(function (c) {
+      if (c.kind === "date") dateCols.push(c.name);
+      else if (c.kind === "number") numCols.push(c.name);
+      else otherCols.push(c.name);
+    });
+    const rec = info.recommended || {};
+    const dateOpts = ([""].concat(dateCols)).map(function (c) {
+      const label = c ? esc(c) : "(autodetect)";
+      return '<option value="' + esc(c) + '"' + (c === rec.date_col ? " selected" : "") + ">" + label + "</option>";
+    }).join("");
+    const valOpts = ["(count rows)"].concat(numCols).map(function (c) {
+      const label = c ? esc(c) : "(count rows)";
+      return '<option' + (c === rec.value_col ? " selected" : "") + '>' + label + "</option>";
+    }).join("");
+    return '<div class="dt-pane-title">Forecast</div>' +
+      '<div class="dt-controls">' +
+      '<label>Date column<select class="f-date">' + dateOpts + "</select></label>" +
+      '<label>Value column<select class="f-value">' + valOpts + "</select></label>" +
+      '<label>Aggregation<select class="f-agg"><option>sum</option><option>mean</option><option>count</option></select></label>' +
+      '<label>Horizon (days)<input class="f-horizon" type="number" min="1" max="365" value="14"></label>' +
+      "</div>" +
+      '<div class="dt-actions"><button class="btn f-run" disabled>Run forecast</button></div>' +
+      '<div class="f-result"></div>';
+  }
+
+  function bindForecast(body, fid, info) {
+    // re-fetch preview when the sheet changes (new columns may appear)
+    const sheetSel = body.querySelector(".dt-sheet");
+    if (sheetSel) {
+      sheetSel.addEventListener("change", async function () {
+        try {
+          const next = await api("/api/v1/files/" + encodeURIComponent(fid) + "/preview?rows=" + PREVIEW_PAGE_ROWS + "&sheet=" + encodeURIComponent(sheetSel.value));
+          const grid = body.querySelector(".dt-grid");
+          grid.innerHTML = '<div class="dt-pane">' + previewPane(next) + "</div>" +
+            '<div class="dt-pane">' + forecastPane(next) + "</div>";
+          bindPreviewGrid(body, fid, next);
+          bindForecast(body, fid, next);
+        } catch (e) {
+          body.querySelector(".f-result").innerHTML = '<div class="dt-err">' + esc(e.message) + "</div>";
+        }
+      });
+      return;
+    }
+    const dateSel = body.querySelector(".f-date");
+    const valSel = body.querySelector(".f-value");
+    const aggSel = body.querySelector(".f-agg");
+    const horiz = body.querySelector(".f-horizon");
+    const runBtn = body.querySelector(".f-run");
+    const result = body.querySelector(".f-result");
+
+    const hasDate = (dateSel.options.length > 1);
+    runBtn.disabled = !hasDate;
+    if (!hasDate) {
+      result.innerHTML = '<div class="dt-msg">No date/time column detected in this file — forecasting needs one.</div>';
+      return;
+    }
+
+    // "(count rows)" selected -> force count aggregation
+    valSel.addEventListener("change", function () {
+      if (valSel.value === "(count rows)") aggSel.value = "count";
+    });
+
+    async function run() {
+      const q = {
+        date_col: dateSel.value || "",
+        value_col: valSel.value === "(count rows)" ? "" : valSel.value,
+        agg: aggSel.value,
+        horizon: (parseInt(horiz.value, 10) || 14),
+      };
+      const qs = Object.keys(q).map(function (k) { return q[k] ? k + "=" + encodeURIComponent(q[k]) : ""; }).filter(Boolean).join("&");
+      result.innerHTML = '<div class="dt-msg">Forecasting…</div>';
+      try {
+        const payload = await api("/api/v1/files/" + encodeURIComponent(fid) + "/forecast" + (qs ? "?" + qs : ""));
+        renderForecast(result, payload);
+      } catch (e) {
+        result.innerHTML = '<div class="dt-err">' + esc(e.message) + "</div>";
+      }
+    }
+
+    runBtn.addEventListener("click", run);
+    [dateSel, valSel, aggSel, horiz].forEach(function (el) {
+      el.addEventListener("change", run);
+    });
+    run();
+  }
+
+  function renderForecast(result, payload) {
+    const m = payload.meta || {};
+    const method = esc(payload.method_description || payload.method);
+    const chart = document.createElement("div");
+    chart.className = "chart";
+    const stats = '<div class="dt-sub">method: <strong>' + method + "</strong> · agg: <strong>" +
+      esc(m.agg) + "</strong> · points: " + fmtRows(m.points) + " · " +
+      esc(m.date_column) + " → " + esc(m.value_column || "row count") + "</div>";
+    const holdout = payload.diagnostics && payload.diagnostics.holdout !== null
+      ? " · evaluated on " + payload.diagnostics.holdout + "-day holdout"
+      : "";
+    result.innerHTML = stats + holdout;
+    result.appendChild(chart);
+    C.forecast(chart, payload);
   }
 
   function sectionHtml(title, inner) {
     const d = document.createElement("div");
     d.className = "section-block";
-    d.innerHTML = "<h4>" + esc(title) + "</h4>" + inner;
+    d.innerHTML = "<h4>" + esc(title) + "</h4>";
+    if (typeof inner === "string") d.insertAdjacentHTML("beforeend", inner);
+    else if (inner) d.appendChild(inner);
     return d;
   }
 
-  function fileSummaryGrid(f) {
-    const d = document.createElement("div");
-    d.className = "summary-grid";
-    d.innerHTML = [
-      ["File", esc(f.filename || "")],
-      ["Type", esc(f.file_type || "")],
-      ["Rows", fmtRows(f.row_count)],
-      ["Columns", (f.columns || []).length],
-      ["Size", fmtBytes(f.size_bytes)],
-      ["SHA-256", esc((f.sha256 || "").slice(0, 12) + "…")],
-      ["Sheet", f.sheet_categories ? esc(f.sheet_categories.map(function (s) { return s.sheet + "→" + s.category; }).join(", ")) : "—"],
-    ].reduce(function (h, pair) { return h + '<div class="sum"><span class="sum-k">' + esc(pair[0]) + "</span><span class='sum-v'>" + esc(pair[1]) + "</span></div>"; }, "");
-    return d;
+  function fmtFinding(x) {
+    const s = String(x);
+    const eq = s.indexOf("=");
+    if (eq === -1) return "<li>" + esc(s) + "</li>";
+    const check = s.slice(0, eq).trim();
+    const rest = s.slice(eq + 1).trim();
+    const sp = rest.indexOf(" ");
+    const status = sp === -1 ? rest : rest.slice(0, sp);
+    const detail = sp === -1 ? "" : rest.slice(sp + 1).trim();
+    const cls = /^fail$/i.test(status) ? "pill-fail" : /^warn/i.test(status) ? "pill-warn" : "pill-ok";
+    return "<li><b>" + esc(check) + "</b> <span class='pill " + cls + "'>" + esc(status) + "</span>" +
+      (detail ? "<span class='f-detail'>" + esc(detail) + "</span>" : "") + "</li>";
   }
 
   function fmtBytes(n) {
@@ -322,19 +706,22 @@
     } else if (kind === "quality") {
       const dq = (f.data_quality || {});
       C.gauge(cbox, dq.score);
-      const checks = (dq.checks || []).map(function (ch) {
-        return '<span class="pill pill-' + esc(ch.status) + '">' + esc(ch.check) + ": " + esc(ch.status) + "</span>";
+      const findings = (f.quality_findings || []).filter(function (x) {
+        return x && !/^[a-z_]+ *= *pass(\b|$)/.test(String(x));
       });
-      extra.innerHTML = checks.join(" ") + (f.quality_findings && f.quality_findings.length ?
-        "<ul class='findings'>" + f.quality_findings.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul>" : "");
+      extra.innerHTML = findings.length
+        ? "<ul class='findings'>" + findings.map(fmtFinding).join("") + "</ul>"
+        : '<div class="muted">All checks passed.</div>';
     } else if (kind === "nulls") {
-      const rows = (f.profile && f.profile.column_profiles || [])
-        .map(function (c) { return { label: c.name, value: c.null_pct, pct: c.null_pct }; });
-      C.hBar(cbox, rows);
-    } else if (kind === "uniques") {
-      const rows = (f.profile && f.profile.column_profiles || [])
-        .map(function (c) { return { label: c.name, value: c.unique_pct, pct: c.unique_pct }; });
-      C.hBar(cbox, rows);
+       const rows = (f.profile && f.profile.column_profiles || [])
+         .map(function (c) { return { label: c.name, value: Number(c.null_pct) || 0, pct: Number(c.null_pct) || 0 }; });
+       const maxN = rows.reduce(function (s, x) { return Math.max(s, x.value); }, 0);
+       C.hBar(cbox, rows, { max: maxN });
+     } else if (kind === "uniques") {
+       const rows = (f.profile && f.profile.column_profiles || [])
+         .map(function (c) { return { label: c.name, value: Number(c.unique_pct) || 0, pct: Number(c.unique_pct) || 0 }; });
+       const maxU = rows.reduce(function (s, x) { return Math.max(s, x.value); }, 0);
+       C.hBar(cbox, rows, { max: maxU });
     }
     return d;
   }
@@ -380,8 +767,10 @@
       if (consumed.has(key)) return;
       const v = da[key];
       if (Array.isArray(v) && v.length && typeof v[0] === "object") {
-        if (v[0].value !== undefined && v[0].count !== undefined) {
-          out.bars.push({ title: key.replace(/_/g, " "), items: v.map(function (r) { return { label: r.value, value: r.count }; }) });
+        const v0 = v[0];
+        if (v0 && typeof v0 === "object" && v0.value !== undefined && v0.count !== undefined) {
+          const items = v.filter(function (x) { return x && typeof x === "object"; }).map(function (r) { return { label: r.value, value: r.count }; });
+          out.bars.push({ title: key.replace(/_/g, " "), items: items });
         } else {
           out.tables.push({ title: key.replace(/_/g, " "), headers: Object.keys(v[0]), rows: v.map(function (r) { return Object.keys(r).map(function (k) { return r[k]; }); }) });
         }
@@ -402,10 +791,13 @@
     blk.dataset.kind = kind;
     blk.innerHTML = "<h4>" + esc(title) + "</h4><div class='chart'></div>";
     const cbox = blk.querySelector(".chart");
-    if (kind === "dbar") C.hBar(cbox, data.items);
-    else if (kind === "ddonut") C.donut(cbox, data.items);
-    else if (kind === "dline") C.line(cbox, data.items);
-    else if (kind === "dvbar") C.vBars(cbox, data);
+    if (kind === "dbar") {
+      const items = (data.items || []).filter(function (x) { return x && typeof x === "object"; }).map(function (x) { return { label: x.label, value: Number(x.value) || 0 }; });
+      const maxB = items.reduce(function (s, x) { return Math.max(s, x.value); }, 0);
+      C.hBar(cbox, items.map(function (x) { return { label: x.label, value: x.value, pct: maxB ? Math.max(0, Math.min(100, (x.value / maxB) * 100)) : 0 }; }), { max: maxB });
+    } else if (kind === "ddonut") C.donut(cbox, data.items || []);
+    else if (kind === "dline") C.line(cbox, data.items || []);
+    else if (kind === "dvbar") C.vBars(cbox, data || {});
     else if (kind === "dtable") {
       blk.innerHTML = "<h4>" + esc(title) + "</h4>" + tableHtml(data.headers || [], data.rows || []);
     }
@@ -414,8 +806,14 @@
 
   function domainSection(f) {
     const dd = domainData(f);
-    if (!dd.kpis.length && !dd.bars.length && !dd.donuts.length && !dd.lines.length && !dd.vbars.length && !dd.tables.length && !dd.notes.length) {
-      return null;
+    const hasContent = !!(dd.kpis.length || dd.bars.length || dd.donuts.length ||
+      dd.lines.length || dd.vbars.length || dd.tables.length);
+    if (!hasContent) {
+      if (!dd.notes.length) return null;
+      const p = document.createElement("div");
+      p.className = "note";
+      p.textContent = "Domain analytics · " + (f.top_category || "—") + " — " + dd.notes.join("; ");
+      return p;
     }
     const sec = document.createElement("div");
     sec.className = "section-block";
@@ -454,7 +852,7 @@
 
   function numberProfile(f) {
     const cols = (f.profile && f.profile.column_profiles || []).filter(function (c) { return c.kind === "number"; });
-    if (!cols.length) return document.createElement("div");
+    if (!cols.length) return null;
     cols.sort(function (a, b) { return (b.mean || 0) - (a.mean || 0); });
     const top = cols.slice(0, 8);
     const d = document.createElement("div");
@@ -477,7 +875,7 @@
     const cols = (f.profile && f.profile.column_profiles || []).filter(function (c) {
       return (c.kind === "category" || c.kind === "text") && (c.top_values || []).length;
     });
-    if (!cols.length) return document.createElement("div");
+    if (!cols.length) return null;
     const top = cols.slice(0, 4);
     const d = document.createElement("div");
     d.className = "charts-grid";
@@ -486,8 +884,9 @@
       blk.className = "chart-block";
       blk.innerHTML = "<h4>Top values · " + esc(c.name) + "</h4><div class='chart'></div>";
       d.appendChild(blk);
-      C.hBar(blk.querySelector(".chart"), (c.top_values || []).slice(0, 10)
-        .map(function (t) { return { label: t.value, value: t.count }; }));
+      const tv = (c.top_values || []).slice(0, 10).filter(function (t) { return t && typeof t === "object"; }).map(function (t) { return { label: t.value, value: t.count || 0 }; });
+      const maxTv = tv.reduce(function (s, x) { return Math.max(s, x.value); }, 0);
+      C.hBar(blk.querySelector(".chart"), tv.map(function (x) { return { label: x.label, value: x.value, pct: maxTv ? Math.max(0, Math.min(100, (x.value / maxTv) * 100)) : 0 }; }), { max: maxTv });
     });
     return d;
   }
@@ -495,23 +894,40 @@
   /* ---------- actions ---------- */
 
   function actions() {
-    const aid = state.analysisId, appId = state.appId;
-    $("openReportBtn").addEventListener("click", async function () {
-      try {
-        const res = await fetch(
-          "/api/v1/applications/" + appId + "/analyses/" + aid + "/report?format=html",
-          { headers: { "X-API-Key": getKey() } }
-        );
-        if (res.status === 401) { askForKey(); return; }
-        const html = await res.text();
-        const w = window.open("", "_blank");
-        if (!w) { alert("Pop-up blocked — allow pop-ups for the report."); return; }
-        w.document.open();
-        w.document.write(html);
-        w.document.close();
-      } catch (e) { alert("Could not open report: " + e.message); }
+    $("openReportBtn").addEventListener("click", function () {
+      const appId = state.appId, aid = state.analysisId;
+      if (!appId || !aid) return;
+      const w = window.open("", "_blank");
+      if (!w) { alert("Pop-up blocked — allow pop-ups for the report."); return; }
+      w.document.open();
+      w.document.write(
+        "<!doctype html><html><head><title>Loading report…</title></head>" +
+        "<body style='font-family:sans-serif;padding:2rem'>Loading report…</body></html>"
+      );
+      w.document.close();
+      fetch(
+        "/api/v1/applications/" + appId + "/analyses/" + aid + "/report?format=html",
+        { headers: { "X-API-Key": getKey() } }
+      )
+        .then(async function (res) {
+          if (res.status === 401) { w.close(); openKeyModal(); return; }
+          if (!res.ok) {
+            const detail = await res.text();
+            w.document.body.innerHTML = "Could not load report (" + res.status + "):<br>" + detail;
+            return;
+          }
+          const html = await res.text();
+          w.document.open();
+          w.document.write(html);
+          w.document.close();
+        })
+        .catch(function (e) {
+          w.document.body.innerHTML = "Could not load report: " + e.message;
+        });
     });
     $("dlJsonBtn").addEventListener("click", async function () {
+      const appId = state.appId, aid = state.analysisId;
+      if (!appId || !aid) return;
       try {
         const a = await api("/api/v1/applications/" + appId + "/analyses/" + aid);
         const blob = new Blob([JSON.stringify(a, null, 2)], { type: "application/json" });
@@ -530,7 +946,8 @@
   function fail(e) {
     if (String(e.message).includes("401")) { openKeyModal(); return; }
     const box = $("emptyBanner");
-    box.innerHTML = '<div class="empty">Error: ' + esc(e.message) + "</div>";
+    if (box) box.innerHTML = '<div class="empty">Error: ' + esc(e.message) + "</div>";
+    else console.error("SiroQ dashboard error:", e);
   }
 
   let resizeTimer = null;
@@ -552,6 +969,22 @@
     $("keyInput").addEventListener("keydown", function (ev) {
       if (ev.key === "Enter") saveKey();
       if (ev.key === "Escape") closeKeyModal();
+    });
+    $("newAppBtn").addEventListener("click", openCreateModal);
+    $("addFilesBtn").addEventListener("click", openAddFilesModal);
+    $("appCreateBtn").addEventListener("click", submitAppModal);
+    $("appCancelBtn").addEventListener("click", closeAppModal);
+    $("appNameInput").addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") submitAppModal();
+      if (ev.key === "Escape") closeAppModal();
+    });
+    $("appModal").addEventListener("click", function (ev) {
+      if (ev.target === $("appModal")) closeAppModal();
+    });
+    $("appFilesInput").addEventListener("change", function (ev) {
+      const n = ev.target.files ? ev.target.files.length : 0;
+      $("appFilesStatus").textContent =
+        n ? n + (n === 1 ? " file selected" : " files selected") : "";
     });
   });
 })();

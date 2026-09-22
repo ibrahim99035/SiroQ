@@ -10,9 +10,97 @@ import numpy as np
 import pandas as pd
 
 from app.analytics_service import analytics, classification, ingestion, profile, quality
+from app.analytics_service.registry import file_analyzer, file_analyzers
 from app.analytics_service.storage import read_bytes
 
 ENGINE_VERSION = "0.1.0"
+
+
+@file_analyzer("profile", order=10)
+def _stage_profile(df, ctx):
+    ctx["profile"] = profile.profile_dataframe(df)
+
+
+@file_analyzer("classification", order=20)
+def _stage_classification(df, ctx):
+    classified = classification.classify_dataframe(df)
+    ctx["classification"] = classified
+    ctx["field_scores"] = classified["field_scores"]
+    ctx["fmap"] = {
+        field: info.get("suggested_mapping")
+        for field, info in classified["field_scores"].items()
+        if info.get("suggested_mapping")
+    }
+
+
+@file_analyzer("quality", order=30)
+def _stage_quality(df, ctx):
+    qc = quality.run_quality_checks(df, ctx["field_scores"])
+    ctx["data_quality"] = qc
+    ctx["quality_findings"] = quality.findings_detail(qc)
+
+
+@file_analyzer("domain", order=40)
+def _stage_domain(df, ctx):
+    cats = ingestion.detect_schema_category(df)
+    top_category = max(cats, key=cats.get) if cats and max(cats.values()) > 0 else None
+    ctx["categories"] = {k: round(v, 3) for k, v in cats.items()}
+    ctx["top_category"] = top_category
+    ctx["domain_analytics"] = (
+        analytics.run_domain_analytics(df, top_category, ctx["fmap"])
+        if top_category
+        else {"skipped": "no category detected"}
+    )
+
+
+def _run_stages(df, ctx) -> None:
+    """Execute every registered analysis stage in order on the shared ctx."""
+    for entry in file_analyzers.all():
+        try:
+            entry.fn(df, ctx)
+        except Exception as exc:  # defensive: one stage never breaks the run
+            ctx.setdefault("stage_errors", []).append(
+                f"{entry.name}: {type(exc).__name__}: {exc}"
+            )
+
+
+def _analyze_dataframe(df, *, sheet=None) -> dict[str, Any]:
+    """Run profile / classification / quality / domain analytics over one frame."""
+    sub: dict[str, Any] = {"sheet": sheet} if sheet is not None else {}
+
+    if df is None or df.empty:
+        sub["row_count"] = 0
+        sub["columns"] = []
+        sub["profile"] = (
+            profile.profile_dataframe(df)
+            if df is not None
+            else {
+                "row_count": 0,
+                "column_count": 0,
+                "columns": [],
+                "profile_error": "no data",
+            }
+        )
+        sub["classification"] = None
+        sub["data_quality"] = quality.run_quality_checks(df, {})
+        sub["domain_analytics"] = {"skipped": "sheet unreadable or empty"}
+        sub["errors"] = ["sheet unreadable or empty"] if df is None else []
+        sub["top_category"] = None
+        return sub
+
+    ctx: dict[str, Any] = {}
+    _run_stages(df, ctx)
+
+    sub["row_count"] = int(len(df))
+    sub["columns"] = list(df.columns)
+    sub["profile"] = ctx["profile"]
+    sub["classification"] = ctx["classification"]
+    sub["data_quality"] = ctx["data_quality"]
+    sub["quality_findings"] = ctx["quality_findings"]
+    sub["categories"] = ctx["categories"]
+    sub["top_category"] = ctx["top_category"]
+    sub["domain_analytics"] = ctx["domain_analytics"]
+    return sub
 
 
 def sanitize(obj: Any) -> Any:
@@ -41,58 +129,6 @@ def sanitize(obj: Any) -> Any:
         except TypeError:  # pragma: no cover
             return None
     return obj
-
-
-def _analyze_dataframe(df, *, sheet=None) -> dict[str, Any]:
-    """Run profile / classification / quality / domain analytics over one frame."""
-    sub: dict[str, Any] = {"sheet": sheet} if sheet is not None else {}
-
-    if df is None or df.empty:
-        sub["row_count"] = 0
-        sub["columns"] = []
-        sub["profile"] = (
-            profile.profile_dataframe(df)
-            if df is not None
-            else {
-                "row_count": 0,
-                "column_count": 0,
-                "columns": [],
-                "profile_error": "no data",
-            }
-        )
-        sub["classification"] = None
-        sub["data_quality"] = quality.run_quality_checks(df, {})
-        sub["domain_analytics"] = {"skipped": "sheet unreadable or empty"}
-        sub["errors"] = ["sheet unreadable or empty"] if df is None else []
-        sub["top_category"] = None
-        return sub
-
-    sub["row_count"] = int(len(df))
-    sub["columns"] = list(df.columns)
-
-    sub["profile"] = profile.profile_dataframe(df)
-    classified = classification.classify_dataframe(df)
-    sub["classification"] = classified
-
-    fmap = {
-        field: info.get("suggested_mapping")
-        for field, info in classified["field_scores"].items()
-        if info.get("suggested_mapping")
-    }
-    qc = quality.run_quality_checks(df, classified["field_scores"])
-    sub["data_quality"] = qc
-    sub["quality_findings"] = quality.findings_detail(qc)
-
-    cats = ingestion.detect_schema_category(df)
-    top_category = max(cats, key=cats.get) if cats and max(cats.values()) > 0 else None
-    sub["categories"] = {k: round(v, 3) for k, v in cats.items()}
-    sub["top_category"] = top_category
-    sub["domain_analytics"] = (
-        analytics.run_domain_analytics(df, top_category, fmap)
-        if top_category
-        else {"skipped": "no category detected"}
-    )
-    return sub
 
 
 def _single_file_section(section: dict[str, Any], ingested) -> dict[str, Any]:
