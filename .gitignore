@@ -184,3 +184,8 @@ data/
 swagger.json
 
 .code-graph/
+
+### SiroQ packaging artifacts ###
+dist/
+build/
+*.egg-info/
