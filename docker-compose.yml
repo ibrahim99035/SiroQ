@@ -43,3 +43,4 @@ services:
 
 volumes:
   siroq_pg_data:
+    name: siroq_siroq_pg_data
