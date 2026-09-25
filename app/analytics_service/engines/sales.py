@@ -27,6 +27,8 @@ def sales_analytics(df: pd.DataFrame, fmap: dict) -> dict[str, Any]:
         skipped.append("sale_timestamp")
 
     out: dict[str, Any] = {"category": "sales", "skipped": skipped}
+    # the report labels the top-products chart with this, so it must be recorded
+    out["amount_field"] = amount_col
     if amount_col:
         revenue = col_sum(df, amount_col)
         out["revenue"] = round(revenue, 2)
@@ -53,19 +55,52 @@ def sales_analytics(df: pd.DataFrame, fmap: dict) -> dict[str, Any]:
             out["top_products"] = [{"product": k, "amount": round(float(v), 2)}
                                    for k, v in by_prod.nlargest(10).items()]
     if ts_col:
-        ts = pd.to_datetime(df[ts_col], errors="coerce").dropna()
-        if len(ts):
-            days = ts.dt.date.value_counts().sort_index()
-            out["daily_series"] = [{"date": str(d), "count": int(c)}
-                                   for d, c in days.items()]
+        ts = pd.to_datetime(df[ts_col], errors="coerce")
+        if ts.notna().any():
+            frame = pd.DataFrame({"_d": ts, "_n": pd.Series(range(len(df)), index=df.index)})
+            frame = frame.dropna(subset=["_d"])
+            grouped = frame.groupby(frame["_d"].dt.date)
+            if amount_col:
+                # Value-aware series: a trend needs the summed amount per day,
+                # not just how many rows landed on it. ``count`` is kept so
+                # existing consumers (dashboard/report) keep working.
+                amounts = numeric(df, amount_col)
+                value_by_day = amounts.groupby(frame["_d"].dt.date).sum()
+                out["daily_series"] = [
+                    {"date": str(d), "count": int(c),
+                     "value": round(float(value_by_day.get(d, 0.0)), 2)}
+                    for d, c in grouped["_n"].count().items()
+                ]
+            else:
+                out["daily_series"] = [
+                    {"date": str(d), "count": int(c), "value": int(c)}
+                    for d, c in grouped["_n"].count().items()
+                ]
         else:
             skipped.append("sale_timestamp(parse)")
     if qty_col and price_col:
         out["gross_merchandise_value"] = round(
             float((numeric(df, qty_col) * numeric(df, price_col)).sum()), 2)
-    if qty_col and price_col and cost_col:
+    # Margin is only meaningful when both sides are the same kind of quantity.
+    # A per-unit cost must never be multiplied by a row total, and a row total
+    # must never be subtracted from a per-unit price -- mixing the two produced
+    # multi-million-unit nonsense margins on per-product files.
+    total_rev_col = pick_col(df, fmap, "total_amount", "total_revenue", "revenue", "net_revenue")
+    total_cost_col = pick_col(df, fmap, "total_cost", "total_cost", "cogs", "total_purchase")
+    if total_rev_col and total_cost_col:
+        margin = float(numeric(df, total_rev_col).sum() - numeric(df, total_cost_col).sum())
+        rev_total = float(numeric(df, total_rev_col).sum())
+        out["margin_basis"] = "row totals"
+    elif qty_col and price_col and cost_col:
         revenue_lines = numeric(df, qty_col) * numeric(df, price_col)
         cost_lines = numeric(df, qty_col) * numeric(df, cost_col)
         margin = float((revenue_lines - cost_lines).sum())
+        rev_total = float(revenue_lines.sum())
+        out["margin_basis"] = "unit economics"
+    else:
+        margin = None
+    if margin is not None:
         out["gross_margin"] = round(margin, 2)
+        if rev_total:
+            out["gross_margin_pct"] = round(100.0 * margin / rev_total, 2)
     return out

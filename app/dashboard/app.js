@@ -240,6 +240,13 @@
   }
 
   function fmtRows(n) { return Number(n || 0).toLocaleString(); }
+  function fmtNum(n) {
+    const v = Number(n);
+    if (!isFinite(v)) return String(n);
+    return Math.abs(v) >= 1000 || (v !== 0 && Math.abs(v) < 0.01)
+      ? v.toLocaleString(undefined, { maximumFractionDigits: 2 })
+      : v.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  }
 
   /* ---------- app header + trend ---------- */
 
@@ -373,6 +380,9 @@
     const domainEl = domainSection(f);
     if (domainEl) wrap.appendChild(domainEl);
 
+    const insightEl = insightSection(f);
+    if (insightEl) wrap.appendChild(insightEl);
+
     const acc = document.createElement("details");
     acc.className = "col-profile";
     acc.innerHTML = "<summary>Column profiles</summary>";
@@ -399,6 +409,125 @@
     const tools = dataTools(f);
     if (tools) wrap.appendChild(tools);
     return wrap;
+  }
+
+  /* ---------- calculated insights ---------- */
+
+  const INSIGHT_FAMILY_ORDER = ["profitability", "trend", "concentration", "waste"];
+  const INSIGHT_FAMILY_TITLES = {
+    profitability: "Profitability", trend: "Trends",
+    concentration: "Concentration", waste: "Waste & stock risk", general: "Insights",
+  };
+
+  function insightSection(f) {
+    const list = Array.isArray(f.insights) ? f.insights : [];
+    if (!list.length) return null;
+    const ok = list.filter(function (i) { return i.status === "ok"; });
+    const notes = list.filter(function (i) { return i.status !== "ok"; });
+
+    const sec = document.createElement("div");
+    sec.className = "section-block";
+    sec.innerHTML = "<h4>Calculated insights</h4>";
+
+    const extra = [];
+    ok.forEach(function (i) {
+      const fam = i.family || "general";
+      if (INSIGHT_FAMILY_ORDER.indexOf(fam) === -1 && extra.indexOf(fam) === -1) extra.push(fam);
+    });
+    INSIGHT_FAMILY_ORDER.concat(extra).forEach(function (fam) {
+      const items = ok.filter(function (i) { return (i.family || "general") === fam; });
+      if (!items.length) return;
+      const head = document.createElement("div");
+      head.className = "insight-group";
+      head.textContent = INSIGHT_FAMILY_TITLES[fam] || fam;
+      sec.appendChild(head);
+      const grid = document.createElement("div");
+      grid.className = "insight-grid";
+      items.forEach(function (it) { grid.appendChild(insightCard(it)); });
+      sec.appendChild(grid);
+    });
+
+    if (notes.length) {
+      const det = document.createElement("details");
+      det.className = "insight-notes";
+      det.innerHTML = "<summary>Not calculated (" + notes.length + ")</summary>";
+      const ul = document.createElement("ul");
+      notes.forEach(function (n) {
+        const li = document.createElement("li");
+        li.className = "insight-note" + (n.status === "error" ? " err" : "");
+        li.innerHTML = "<strong>" + esc(n.label || n.key || "") + "</strong> — " +
+          esc(n.detail || "") +
+          ((n.missing_columns && n.missing_columns.length)
+            ? ' <span class="insight-missing">needs: ' + esc(n.missing_columns.join(", ")) + "</span>"
+            : "");
+        ul.appendChild(li);
+      });
+      det.appendChild(ul);
+      sec.appendChild(det);
+    }
+    return sec;
+  }
+
+  function insightCard(it) {
+    const card = document.createElement("div");
+    card.className = "insight-card " + (it.severity || "info");
+    card.innerHTML =
+      '<div class="insight-name">' + esc(it.label || "") + "</div>" +
+      '<div class="insight-value ' + (it.severity || "info") + '">' +
+        esc(fmtInsightValue(it.value, it.unit)) + "</div>" +
+      (it.detail ? '<div class="insight-detail">' + esc(it.detail) + "</div>" : "");
+    if (it.evidence && Object.keys(it.evidence).length) {
+      const rows = insightEvidence(it.evidence);
+      if (rows.length) {
+        const dl = document.createElement("dl");
+        dl.className = "insight-ev";
+        rows.forEach(function (r) {
+          const dt = document.createElement("dt");
+          dt.textContent = r[0];
+          const dd = document.createElement("dd");
+          dd.textContent = r[1];
+          dl.appendChild(dt);
+          dl.appendChild(dd);
+        });
+        card.appendChild(dl);
+      }
+    }
+    return card;
+  }
+
+  function fmtInsightValue(value, unit) {
+    if (value === null || value === undefined || value === "") return "—";
+    const n = Number(value);
+    if (!isFinite(n)) return String(value);
+    if (unit === "percent") return n.toFixed(2) + "%";
+    if (unit === "currency") return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (unit === "ratio") return n.toFixed(2) + "x";
+    if (["index", "count", "rows", "products", "units"].indexOf(unit) !== -1) {
+      return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    }
+    return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+
+  function insightEvidence(ev) {
+    const rows = [];
+    Object.keys(ev).forEach(function (k) {
+      if (k === "top" || k === "buckets" || k === "products") return;
+      const v = ev[k];
+      if (v === null || v === undefined || v === "") return;
+      if (typeof v === "object") return;
+      rows.push([k.replace(/_/g, " "), typeof v === "number" ? fmtNum(v) : String(v)]);
+    });
+    if (ev.top && ev.top.length) {
+      rows.push(["worst", ev.top.slice(0, 3).map(function (t) {
+        return (t.product || t.month || "?") + " (" + fmtNum(t.value) + ")";
+      }).join(", ")]);
+    }
+    if (ev.buckets) {
+      const b = ev.buckets;
+      rows.push(["buckets", "expired " + (b.expired || 0) + " · ≤30d " + (b["30"] || 0) +
+        " · ≤90d " + (b["90"] || 0) + " · ≤180d " + (b["180"] || 0)]);
+    }
+    return rows.slice(0, 6);
   }
 
   /* ---------- data preview + forecast tools ---------- */
@@ -897,6 +1026,8 @@
     $("openReportBtn").addEventListener("click", function () {
       const appId = state.appId, aid = state.analysisId;
       if (!appId || !aid) return;
+      const reportUrl =
+        "/api/v1/applications/" + appId + "/analyses/" + aid + "/report?format=html";
       const w = window.open("", "_blank");
       if (!w) { alert("Pop-up blocked — allow pop-ups for the report."); return; }
       w.document.open();
@@ -905,24 +1036,30 @@
         "<body style='font-family:sans-serif;padding:2rem'>Loading report…</body></html>"
       );
       w.document.close();
-      fetch(
-        "/api/v1/applications/" + appId + "/analyses/" + aid + "/report?format=html",
-        { headers: { "X-API-Key": getKey() } }
-      )
+      fetch(reportUrl, { headers: { "X-API-Key": getKey() } })
         .then(async function (res) {
           if (res.status === 401) { w.close(); openKeyModal(); return; }
           if (!res.ok) {
             const detail = await res.text();
-            w.document.body.innerHTML = "Could not load report (" + res.status + "):<br>" + detail;
+            w.document.body.innerHTML = "Could not load report (" + res.status + "):<br>" + esc(detail);
             return;
           }
           const html = await res.text();
           w.document.open();
           w.document.write(html);
           w.document.close();
+          // document.write leaves the tab on about:blank, so the address bar
+          // showed the dashboard URL and the report could not be refreshed,
+          // bookmarked or reloaded. Point the tab at the real report URL.
+          try {
+            w.history.replaceState(null, "", reportUrl);
+          } catch (e) {
+            /* cross-origin or blocked: the report still renders */
+          }
+          w.focus();
         })
         .catch(function (e) {
-          w.document.body.innerHTML = "Could not load report: " + e.message;
+          w.document.body.innerHTML = "Could not load report: " + esc(e.message);
         });
     });
     $("dlJsonBtn").addEventListener("click", async function () {
@@ -958,11 +1095,36 @@
     }, 220);
   }
 
+  /* ---------- build freshness ---------- */
+
+  function hardReload() {
+    // location.reload() can be served from cache; ask for the network copy
+    try { location.replace(location.pathname + "?build=" + Date.now()); }
+    catch (e) { location.reload(); }
+  }
+
+  function checkBuildFreshness() {
+    const meta = document.querySelector('meta[name="siroq-build"]');
+    const loaded = meta && meta.getAttribute("content");
+    return fetch("/dashboard/build.json", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (loaded && d.build && d.build !== loaded) {
+          const banner = $("staleBanner");
+          if (banner) banner.hidden = false;
+        }
+      })
+      .catch(function () { /* offline: keep the current build */ });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     actions();
     boot();
+    checkBuildFreshness();
+    setInterval(checkBuildFreshness, 60000);
     window.addEventListener("resize", onResize);
     $("reloadBtn").addEventListener("click", boot);
+    $("staleReloadBtn").addEventListener("click", hardReload);
     $("keyBtn").addEventListener("click", function () { openKeyModal(); });
     $("keySaveBtn").addEventListener("click", saveKey);
     $("keyCancelBtn").addEventListener("click", closeKeyModal);

@@ -277,3 +277,47 @@ th { background: var(--bg); font-weight: 600; }
   .sidebar { max-height: 300px; }
   .top-actions { flex-wrap: wrap; }
 }
+/* calculated insights */
+.insight-group {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--mut);
+  margin: 12px 0 6px; font-weight: 700;
+}
+.insight-group:first-of-type { margin-top: 4px; }
+.insight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.insight-card {
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--mut);
+  border-radius: 10px; padding: 10px 12px; min-width: 0;
+}
+.insight-card.good { border-left-color: var(--good); }
+.insight-card.warn { border-left-color: var(--warn); }
+.insight-card.bad { border-left-color: var(--bad); }
+.insight-card.info { border-left-color: var(--accent); }
+.insight-name { font-size: 11.5px; color: var(--mut); font-weight: 600; }
+.insight-value {
+  font-size: 19px; font-weight: 700; color: var(--ink); margin: 2px 0 3px;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.insight-value.good { color: var(--good); }
+.insight-value.warn { color: var(--warn); }
+.insight-value.bad { color: var(--bad); }
+.insight-detail { font-size: 11.5px; color: var(--mut); line-height: 1.45; }
+.insight-ev {
+  display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 7px 0 0;
+  font-size: 11px; color: var(--mut); border-top: 1px dashed var(--line); padding-top: 6px;
+}
+.insight-ev dt { text-transform: capitalize; white-space: nowrap; }
+.insight-ev dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.insight-notes { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.insight-notes summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--mut); }
+.insight-notes ul { margin: 8px 0 2px; padding-left: 18px; }
+.insight-note { font-size: 11.5px; color: var(--mut); line-height: 1.5; margin-bottom: 4px; }
+.insight-note strong { color: var(--ink); }
+.insight-note.err { color: var(--bad); }
+.insight-missing { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--warn); }
+
+.stale-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 16px; background: #fef3c7; color: #92400e;
+  border-bottom: 1px solid #fcd34d; font-size: 13px;
+}
+.stale-banner .btn { margin-left: auto; }

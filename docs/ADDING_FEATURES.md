@@ -185,22 +185,110 @@ Notes:
 
 ---
 
-## 6. Verify
+## 6. Add a calculated insight
 
-Lint/compile the touched modules and run the suite against the **throwaway DB**
-(never the live one):
+Insights are cross-file business facts (profitability, concentration, waste,
+trends) rather than per-category engines. They live in
+`app/analytics_service/insights.py`, are registered with `@insight_rule`, and
+run in the `insights` pipeline stage (order 50).
+
+```python
+# app/analytics_service/insights.py
+import pandas as pd
+
+from app.analytics_service.registry import insight_rule
+
+REVENUE = ("total_amount", "revenue", "total_revenue")
+PRICE = ("unit_price", "selling_price")
+
+
+@insight_rule("discount_depth", family="profitability", order=42,
+              requires=("total_amount", "unit_price"))
+def discount_depth(ctx) -> dict:
+    revenue_col = ctx.first(REVENUE)
+    price_col = ctx.first(PRICE)
+    if revenue_col is None or price_col is None:
+        return _skip(["total_amount", "unit_price"],
+                     "Needs a row revenue column and a unit price column.")
+    price = ctx.num(price_col).replace(0, pd.NA)
+    if price.isna().all():
+        return _skip(["unit_price"], "Unit price is zero or empty everywhere.")
+    depth = 1.0 - (ctx.num(revenue_col) / price).mean()
+    return _ok(
+        round(float(depth) * 100, 2), "percent",
+        "Average discount implied by row revenue vs list price.",
+        evidence={"rows": int(len(ctx.df))},
+    )
+```
+
+Notes:
+- **Never raise.** The dispatcher isolates every rule: an exception becomes
+  `status="error"` with the message, and the other rules still run. Return
+  `_skip(...)` for anything you cannot compute.
+- `_skip(missing, reason)` fills in `status="skipped"`, `severity="muted"`,
+  `value=None` and `missing_columns`; the reason sentence becomes the
+  user-facing note, so say which columns are needed.
+- `_ok(value, unit, detail, severity=..., evidence=...)` is JSON-safe by
+  contract: NumPy scalars are converted and `evidence` is truncated to keep one
+  result small. Keep evidence to a handful of scalars plus a short
+  `top`/`buckets` list.
+- `severity` drives the UI colour: `good` / `warn` / `bad` / `info` (and `muted`
+  for skipped).
+- Columns are reached through the classification map, never by hard-coded
+  header. Declare a module constant as a flat tuple of the canonical name
+  followed by fallbacks (`REVENUE = ("total_amount", "revenue", ...)`), then use
+  `ctx.first(REVENUE)` for the first group that resolves, `ctx.col("unit_price",
+  "selling_price")` for one name plus fallbacks, and `ctx.require(REVENUE,
+  COST_TOTAL)` when you need the missing names too. `ctx.num` / `ctx.dates` /
+  `ctx.label_of` coerce a column to numbers, datetimes and product labels.
+- Use `ctx.unit_cost()` when valuing stock. It prefers a real unit-cost column
+  and otherwise derives one as `total_cost / quantity_sold`, labelling the
+  result `implied` — multiplying stock by a row total is never correct.
+- `family` must be one of the keys in `INSIGHT_FAMILY_TITLES` in
+  `reporting.py` (or a new key, which is rendered verbatim).
+
+Registration is import-time: `pipeline.py` imports `insights`, so editing that
+module is enough — no list to maintain.
+
+### Adding a canonical field
+
+Rules read columns through the classification map, so a new source field may
+need a canonical name in `app/analytics_service/classification.py`:
+
+- Add it to `CANONICAL_FIELDS` with a `kind`, and to `FIELD_VALUE_KINDS` if it
+  must be matched by *content* rather than header text.
+- **Cost, profit, stock, event and waste fields belong in
+  `HEADER_ONLY_FIELDS`.** Those must never be inferred from numbers alone — an
+  arbitrary numeric column is otherwise mapped as revenue, and stock valuation
+  or margin silently comes out wrong. Prefer a confident header match and skip
+  the insight when the header is unknown.
+
+---
+
+## 7. Verify
+
+Lint/compile the touched modules and run the suite:
 
 ```bash
 .venv/bin/python -m compileall -q app tests
-
-DATABASE_URL="postgresql+psycopg://siroq_app:siroq_app_dev_password@localhost:5433/siroq_test" \
-MIGRATIONS_DATABASE_URL="postgresql+psycopg://siroq:siroq_dev_password@localhost:5433/siroq_test" \
-STORAGE_PATH="/tmp/opencode/siroq_test_storage" \
 .venv/bin/python -m pytest -q
 ```
 
-Baseline: **46 passed**. The tests truncate the test DB and wipe the test
-storage each run, so the live `siroq` DB and `./data/storage` stay untouched.
+`tests/conftest.py` rewrites `DATABASE_URL` and `MIGRATIONS_DATABASE_URL` to
+the sibling `*_test` database (creating it if needed) **before** importing
+`app.config`, and every test truncates only that database. Point `STORAGE_PATH`
+somewhere throwaway as well:
+
+```bash
+STORAGE_PATH="/tmp/opencode/siroq_test_storage" .venv/bin/python -m pytest -q
+```
+
+This redirect is not optional. The isolation fixture truncates
+`applications, files, analyses`, so running the suite against the development
+database erases real applications, their analyses and their file rows — the
+files survive in storage only because they are content-addressed.
+
+Baseline: **72 passed**.
 
 ### Golden rules
 
@@ -214,3 +302,5 @@ storage each run, so the live `siroq` DB and `./data/storage` stay untouched.
 - **Registration is import-time.** New modules must be imported somewhere that
   is always loaded (`engines/__init__.py` for engines; the module's own file for
   checks/methods/stages/readers) or the feature silently won't register.
+- **A skipped rule is a feature, not a gap.** If a file lacks the columns for an
+  insight, say so explicitly and name the columns; never let a rule guess.

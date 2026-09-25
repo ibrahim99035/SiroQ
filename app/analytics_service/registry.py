@@ -2,6 +2,7 @@
 the analysis service pluggable:
 
 - ``domain_engines``   : per-category domain analytics (e.g. ``sales``)
+- ``insight_rules``    : derived, calculated insights (trends, waste, Pareto)
 - ``quality_checks``   : data-quality gates + the aggregated score
 - ``forecast_methods`` : statistical forecast builders
 - ``file_analyzers``   : per-dataframe pipeline stages
@@ -95,6 +96,7 @@ class Registry:
 # --- shared registries ------------------------------------------------------
 
 domain_engines = Registry("domain engine")
+insight_rules = Registry("insight rule")
 quality_checks = Registry("quality check")
 forecast_methods = Registry("forecast method")
 file_analyzers = Registry("file analyzer")
@@ -108,6 +110,30 @@ def domain_engine(category: str, *, order: float = 100.0) -> Callable:
     return value becomes the file's ``domain_analytics`` document.
     """
     return domain_engines.register(category, order=order)
+
+
+def insight_rule(
+    key: str,
+    *,
+    family: str = "general",
+    order: float = 100.0,
+    requires: tuple[str, ...] = (),
+) -> Callable:
+    """Decorate a calculated insight, e.g. ``@insight_rule("pareto_80")``.
+
+    The rule is called as ``fn(ctx) -> dict`` where ``ctx`` is the
+    :class:`~app.analytics_service.insights.InsightContext` passed in. It must
+    always return a dict shaped like
+    ``{"value": ..., "unit": ..., "detail": ..., "evidence": {...}}``; the
+    dispatcher fills in ``key``/``family``/``status``/``severity``.
+
+    Rules never raise: a rule that cannot find its input columns returns a
+    ``skipped`` result naming what was missing, so one absent column degrades a
+    single insight instead of failing the analysis.
+    """
+    return insight_rules.register(
+        key, family=family, order=order, requires=tuple(requires)
+    )
 
 
 def quality_check(name: str, *, penalty: float = 0.0, needs_field_scores: bool = False) -> Callable:

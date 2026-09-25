@@ -83,9 +83,12 @@ def _interpret_domain(da: Any) -> dict:
 
     # Hand-shaped series.
     products = da.get("top_products")
+    consumed.add("amount_field")
     if isinstance(products, list):
+        # named from the amount column the engine actually aggregated
+        amount_field = da.get("amount_field") or "revenue"
         out["bars"].append({
-            "title": "Top products by {amount}",
+            "title": f"Top products by {str(amount_field).replace('_', ' ')}",
             "bars": bars(_pairs(products, "product", "amount")),
         })
         consumed.add("top_products")
@@ -99,11 +102,23 @@ def _interpret_domain(da: Any) -> dict:
         consumed.add("payment_mix")
 
     daily = da.get("daily_series")
-    if isinstance(daily, list):
-        out["bars"].append({
-            "title": "Daily series (count)",
-            "bars": bars(_pairs(daily, "date", "count"), 20),
-        })
+    if isinstance(daily, list) and daily:
+        # daily_series carries both count and a summed value; prefer the value
+        # for sales, where revenue matters more than row tally.
+        has_value = all(
+            isinstance(d, dict) and _num(d.get("value")) and d.get("value")
+            for d in daily
+        )
+        if has_value:
+            out["bars"].append({
+                "title": f"Daily series ({da.get('amount_field') or 'amount'})",
+                "bars": bars(_pairs(daily, "date", "value"), 20),
+            })
+        else:
+            out["bars"].append({
+                "title": "Daily series (count)",
+                "bars": bars(_pairs(daily, "date", "count"), 20),
+            })
         consumed.add("daily_series")
 
     iph = da.get("inventory_profile_headers") or da.get("categorical_flags")
@@ -187,6 +202,167 @@ def _profile_rows(profile: Any) -> list[dict]:
     return rows
 
 
+INSIGHT_FAMILY_TITLES = {
+    "profitability": "Profitability",
+    "concentration": "Concentration",
+    "waste": "Waste & stock risk",
+    "trend": "Trends",
+    "general": "Insights",
+}
+
+FAMILY_ORDER = ["profitability", "trend", "concentration", "waste", "general"]
+
+
+TOP_LIST_LABELS = {
+    # a loss/overstock list is ordered worst-first; a Pareto list is the
+    # biggest contributors, so calling it "worst" would misread the evidence
+    "loss_making_products": "worst",
+    "overstocked_products": "worst",
+    "pareto_80": "top contributors",
+}
+
+
+def _insight_evidence_rows(evidence: Any, insight_key: str | None = None) -> list[dict[str, str]]:
+    """Flatten one insight's ``evidence`` into printable label/value rows.
+
+    Scalars pass through. The two structured shapes rules emit get a compact
+    rendering (``top`` -> "a (1), b (2)"; ``buckets`` -> "expired 1, 30d 2").
+    ``series`` is dropped: a full trend series is a chart, not a table cell.
+    """
+    if not isinstance(evidence, dict):
+        return []
+    rows: list[dict[str, str]] = []
+    for key, value in evidence.items():
+        if key in {"series", "products"}:
+            continue
+        label = key.replace("_", " ")
+        if key == "buckets" and isinstance(value, dict):
+            parts = [
+                f"{name}d {count}" if name.isdigit() else f"{name} {count}"
+                for name, count in value.items()
+            ]
+            if parts:
+                rows.append({"label": label, "value": " · ".join(parts)})
+            continue
+        if key == "top" and isinstance(value, list):
+            parts = []
+            for entry in value[:3]:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("product") or entry.get("month") or entry.get("label")
+                if name is None:
+                    continue
+                figure = next(
+                    (entry[k] for k in ("value", "profit", "excess", "ratio")
+                     if isinstance(entry.get(k), (int, float))),
+                    None,
+                )
+                parts.append(f"{name} ({figure:,.2f})" if isinstance(figure, (int, float))
+                             else str(name))
+            if parts:
+                rows.append({
+                    "label": TOP_LIST_LABELS.get(insight_key or "", "worst"),
+                    "value": ", ".join(parts),
+                })
+            continue
+        if isinstance(value, dict):
+            continue
+        if value is None or value == "":
+            continue
+        if isinstance(value, float):
+            # plain decimal notation: 1.235e+06 is unreadable in a report
+            if value != 0 and abs(value) < 0.01:
+                rendered = f"{value:,.6g}"  # keep magnitudes 2dp would zero out
+            else:
+                rendered = f"{value:,.2f}".rstrip("0").rstrip(".")
+                if rendered in {"", "-", "-0"}:
+                    rendered = "0"
+        elif isinstance(value, int):
+            rendered = f"{value:,}"
+        else:
+            rendered = str(value)
+        rows.append({"label": label, "value": rendered})
+    return rows
+
+
+def _insight_value(item: dict) -> str:
+    """Format one insight's value with its unit for display."""
+    val = item.get("value")
+    if val is None:
+        return "—"
+    unit = item.get("unit")
+    if unit == "percent":
+        return f"{float(val):.2f}%"
+    if unit == "currency":
+        return f"{float(val):,.2f}"
+    if unit == "ratio":
+        return f"{float(val):.2f}x"
+    if unit in {"index"}:
+        return f"{float(val):,.0f}"
+    if unit in {"count", "rows", "products", "units"}:
+        return f"{float(val):,.0f}"
+    if isinstance(val, (int, float)):
+        return f"{val:,.2f}"
+    return str(val)
+
+
+def build_insight_model(insights: Any) -> dict:
+    """Group calculated insights by family, ready for the template.
+
+    Rules that could not run are kept (never dropped) under ``notes`` so the
+    report states which columns each missing insight needs instead of silently
+    omitting it.
+    """
+    groups: list[dict] = []
+    items = [i for i in (insights or []) if isinstance(i, dict)]
+    by_family: dict[str, list[dict]] = {}
+    notes: list[dict] = []
+    for item in items:
+        status = item.get("status")
+        if status == "ok":
+            by_family.setdefault(item.get("family") or "general", []).append(item)
+        else:
+            notes.append({
+                "label": item.get("label") or item.get("key"),
+                "status": status or "skipped",
+                "detail": item.get("detail") or "",
+                "missing": ", ".join(item.get("missing_columns") or item.get("requires") or []),
+            })
+    for family in FAMILY_ORDER:
+        rows = by_family.get(family)
+        if not rows:
+            continue
+        groups.append({
+            "title": INSIGHT_FAMILY_TITLES.get(family, family.title()),
+            "items": [
+                {
+                    "label": r.get("label"),
+                    "value": _insight_value(r),
+                    "unit": r.get("unit"),
+                    "severity": r.get("severity") or "info",
+                    "detail": r.get("detail") or "",
+                    "evidence": r.get("evidence") or {},
+                    "evidence_rows": _insight_evidence_rows(r.get("evidence"), r.get("key")),
+                }
+                for r in rows
+            ],
+        })
+    for family, rows in by_family.items():
+        if family in FAMILY_ORDER:
+            continue
+        groups.append({
+            "title": INSIGHT_FAMILY_TITLES.get(family, family.title()),
+            "items": [
+                {"label": r.get("label"), "value": _insight_value(r),
+                 "unit": r.get("unit"), "severity": r.get("severity") or "info",
+                 "detail": r.get("detail") or "", "evidence": r.get("evidence") or {},
+                 "evidence_rows": _insight_evidence_rows(r.get("evidence"), r.get("key"))}
+                for r in rows
+            ],
+        })
+    return {"groups": groups, "notes": notes, "total": len(items)}
+
+
 def build_file_model(f: Any) -> dict:
     model: dict[str, Any] = {
         "filename": f.get("filename"),
@@ -232,6 +408,7 @@ def build_file_model(f: Any) -> dict:
     da = f.get("domain_analytics")
     if da is not None:
         model["domain"] = _interpret_domain(da)
+    model["insights"] = build_insight_model(f.get("insights"))
     return model
 
 

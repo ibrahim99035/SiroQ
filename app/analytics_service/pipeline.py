@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.analytics_service import analytics, classification, ingestion, profile, quality
+from app.analytics_service import analytics, classification, ingestion, insights, profile, quality
 from app.analytics_service.registry import file_analyzer, file_analyzers
 from app.analytics_service.storage import read_bytes
 
@@ -53,6 +53,19 @@ def _stage_domain(df, ctx):
     )
 
 
+@file_analyzer("insights", order=50)
+def _stage_insights(df, ctx):
+    """Derived metrics (margin, concentration, waste, trends).
+
+    Runs after ``domain`` so the detected category can be attached. Rules
+    degrade individually, so a file with no date column still yields every
+    non-trend insight.
+    """
+    ctx["insights"] = insights.compute_insights(
+        df, ctx.get("fmap"), ctx.get("top_category")
+    )
+
+
 def _run_stages(df, ctx) -> None:
     """Execute every registered analysis stage in order on the shared ctx."""
     for entry in file_analyzers.all():
@@ -84,6 +97,7 @@ def _analyze_dataframe(df, *, sheet=None) -> dict[str, Any]:
         sub["classification"] = None
         sub["data_quality"] = quality.run_quality_checks(df, {})
         sub["domain_analytics"] = {"skipped": "sheet unreadable or empty"}
+        sub["insights"] = []
         sub["errors"] = ["sheet unreadable or empty"] if df is None else []
         sub["top_category"] = None
         return sub
@@ -100,6 +114,7 @@ def _analyze_dataframe(df, *, sheet=None) -> dict[str, Any]:
     sub["categories"] = ctx["categories"]
     sub["top_category"] = ctx["top_category"]
     sub["domain_analytics"] = ctx["domain_analytics"]
+    sub["insights"] = ctx.get("insights", [])
     return sub
 
 
@@ -187,6 +202,7 @@ def _multi_sheet_section(section: dict[str, Any], ingested) -> dict[str, Any]:
     section["domain_analytics"] = {
         "skipped": "multi-sheet workbook; analyze each sheet separately"
     }
+    section["insights"] = []
     return section
 
 

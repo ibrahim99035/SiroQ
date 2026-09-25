@@ -27,6 +27,9 @@
   .kpi .value { font-size:19px; font-weight:700; margin-top:2px; }
   .kpi .score-bad { color:var(--bad); } .kpi .score-warn { color:var(--warn); }
   .kpi .score-good { color:var(--ok); }
+  .sev-good { color:var(--ok); } .sev-warn { color:var(--warn); }
+  .sev-bad { color:var(--bad); } .sev-info { color:var(--ink); }
+  .sev-muted { color:var(--mut); }
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
   .card { border:1px solid var(--line); border-radius:10px; padding:14px 16px; background:#fff; }
   .card h3 { margin:0 0 8px; font-size:14px; }
@@ -51,6 +54,11 @@
   .pill.ok { background:#dcfce7; color:#15803d; } .pill.pass { background:#dcfce7; color:#15803d; }
   .pill.warn { background:#fef3c7; color:#b45309; } .pill.fail { background:#fee2e2; color:#b91c1c; }
   .muted { color:var(--mut); }
+  td.evidence { font-size:12px; }
+  td.evidence dl { margin:0; display:grid; grid-template-columns:auto 1fr; gap:1px 8px; }
+  td.evidence dt { color:var(--mut); }
+  td.evidence dt::after { content:" "; }
+  td.evidence dd { margin:0; font-variant-numeric:tabular-nums; }
   .file-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
   .file-head h3 { margin:0; font-size:15px; }
   .findings li { margin:3px 0; }
@@ -60,6 +68,7 @@
     .nav { display:none; }
     h2.section { break-after:avoid; }
     .card, table { break-inside:avoid; }
+    tr { break-inside:avoid; }
   }
 </style>
 </head>
@@ -111,10 +120,10 @@
     <div class="file-head">
       <h3><span class="tag {{ f.top_category or '' }}">{{ f.top_category or 'uncategorized' }}</span>
           {% if f.top_category %}top category{% endif %}</h3>
-      <span class="muted">{{ f.file_type }} · {{ "{:,}".format(f.size_bytes) }} bytes · sha256 {{ (f.sha256 or '')[:16] }}…</span>
+      <span class="muted">{{ f.file_type }} · {{ "{:,}".format(f.size_bytes) if f.size_bytes is not none else "—" }} bytes · sha256 {{ (f.sha256 or '')[:16] }}…</span>
     </div>
     <p class="muted" style="margin:6px 0 0">
-      {{ "{:,}".format(f.row_count) }} rows · {{ f.column_count }} columns{% if f.multi_sheet %} · multi-sheet{% endif %}
+      {{ "{:,}".format(f.row_count) if f.row_count is not none else "—" }} rows · {{ f.column_count }} columns{% if f.multi_sheet %} · multi-sheet{% endif %}
     </p>
     {% if f.notes %}
     <ul class="notes">{% for n in f.notes %}<li>{{ n }}</li>{% endfor %}</ul>
@@ -127,7 +136,7 @@
     <table>
       <tr><th>Sheet</th><th>Rows</th><th>Top category</th></tr>
       {% for s in f.rows %}
-      <tr><td>{{ s.sheet or '—' }}</td><td>{{ "{:,}".format(s.rows) }}</td>
+      <tr><td>{{ s.sheet or '—' }}</td><td>{{ "{:,}".format(s.rows) if s.rows is not none else "—" }}</td>
           <td><span class="tag {{ s.top_category or '' }}">{{ s.top_category or '—' }}</span></td></tr>
       {% endfor %}
     </table>
@@ -193,6 +202,46 @@
     </div>
     {% endif %}
   </div>
+
+  {% if f.insights and (f.insights.groups or f.insights.notes) %}
+  <div class="card">
+    <h3>Calculated insights</h3>
+    {% for g in f.insights.groups %}
+    <h4 style="margin:12px 0 4px">{{ g.title }}</h4>
+    <table>
+      <tr><th style="width:22%">Insight</th><th style="width:16%">Value</th><th style="width:26%">Detail</th><th>Evidence</th></tr>
+      {% for it in g['items'] %}
+      <tr>
+        <td>{{ it.label }}</td>
+        <td><strong class="sev-{{ it.severity }}">{{ it.value }}</strong></td>
+        <td class="muted">{{ it.detail }}</td>
+        <td class="evidence">
+          {% if it.evidence_rows %}
+          <dl>
+            {% for e in it.evidence_rows %}
+            <dt>{{ e.label }}</dt><dd>{{ e.value }}</dd>
+            {% endfor %}
+          </dl>
+          {% else %}
+          <span class="muted">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endfor %}
+    {% if f.insights.notes %}
+    <h4 style="margin:12px 0 4px">Not calculated</h4>
+    <ul class="findings">
+      {% for n in f.insights.notes %}
+      <li{% if n.status == 'error' %} style="color:var(--bad)"{% endif %}>
+        <strong>{{ n.label }}</strong> — {{ n.detail }}{% if n.missing %} <span class="muted">(needs: {{ n.missing }})</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endif %}
 
   {% if f.findings %}
   <div class="card">

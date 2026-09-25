@@ -188,5 +188,8 @@ def test_multi_sheet_excel_analyzes_each_sheet(client):
     summary = r.json()["summary"]
     assert summary["categories_detected"]["sales"] == ["workbook.xlsx[Sales]"]
     assert summary["categories_detected"]["prescriptions"] == ["workbook.xlsx[Prescriptions]"]
-    assert summary["data_quality_score"] == 100.0
-    assert summary["findings_count"] == 0
+    # ndc is a drug identifier, not a business field: it must stay unmapped
+    # instead of being inferred as total_amount, so it costs the 5-point penalty
+    # and raises one unmapped-column finding.
+    assert summary["data_quality_score"] == 97.5
+    assert summary["findings_count"] == 1

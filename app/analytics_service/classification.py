@@ -33,9 +33,9 @@ CANONICAL_FIELD_SYNONYMS = {
                         "رقم العملية", "رقم الفاتورة"],
     "quantity": ["qty", "quantity", "amount", "count", "الكمية", "qty_sold",
                  "quantity_sold", "sold quantity", "sold_qty"],
-    "unit_price": ["unit price", "price per unit", "unit cost",
-                   "سعر الوحدة", "السعر", "unit_price", "price",
-                   "selling_price", "sale price"],
+    "unit_price": ["unit price", "price per unit", "selling price", "sale price",
+                   "retail price", "سعر البيع", "سعر الوحدة", "السعر", "unit_price",
+                   "price", "selling_price"],
     "total_amount": ["total amount", "total sales", "grand total",
                      "الإجمالي", "المبلغ", "total_amount", "total",
                      "total_revenue", "revenue", "net_revenue"],
@@ -47,10 +47,45 @@ CANONICAL_FIELD_SYNONYMS = {
                  "batch_id", "batch_no", "lot_no"],
     "product_name": ["product", "drug name", "medicine name", "drug",
                      "اسم المنتج", "المنتج", "product_name", "item", "item_name"],
+    # Cost / profit / stock / event fields. These are matched by header only (see
+    # HEADER_ONLY_FIELDS below), so appending them cannot steal a column from the
+    # amount/quantity fields above; they simply never fire without a real header.
+    "unit_cost": ["unit cost", "cost per unit", "unit_cost", "cost price",
+                  "purchase price", "سعر التكلفة", "تكلفة الوحدة"],
+    "total_cost": ["total cost", "total_cost", "cogs", "cost of goods sold",
+                   "total purchase", "تكلفة"],
+    "net_profit": ["net profit", "net_profit", "profit", "margin amount",
+                   "صافي الربح", "الربح"],
+    "stock_on_hand": ["stock balance", "stock_balance", "on hand", "on_hand",
+                      "quantity_on_hand", "balance", "inventory balance",
+                      "المخزون", "الرصيد"],
+    "event_type": ["event type", "event_type", "transaction type",
+                   "transaction_type", "movement", "movement type",
+                   "stock movement", "نوع الحركة"],
+    "waste_quantity": ["waste qty", "waste_quantity", "waste amount",
+                       "writeoff qty", "writeoff_quantity", "write off",
+                       "damaged qty", "damage qty", "expired qty", "waste"],
 }
 
 CONF_CONFIRMED = 90
 CONF_UNCERTAIN = 70
+
+# Fields that are matched by header name ONLY. A bare number is not evidence that
+# a column is a price, a cost, a profit or a stock level -- an unlabelled numeric
+# column is far more often something else entirely (a product code, a stock
+# level) -- so inferring these from content produced nonsense mappings such as
+# product_code -> unit_cost and stock_on_hand -> unit_price, which then valued
+# stock by a product id and margins by a stock balance. Insight rules still
+# resolve them by their own literal-column fallbacks, so nothing is lost.
+HEADER_ONLY_FIELDS = {
+    "unit_price",
+    "unit_cost",
+    "total_cost",
+    "net_profit",
+    "stock_on_hand",
+    "event_type",
+    "waste_quantity",
+}
 
 # Acceptable detected-value kinds per canonical field. The content-inference
 # pass may only suggest a source column whose detected kind is in this set, so a
@@ -67,6 +102,12 @@ FIELD_VALUE_KINDS = {
     "prescriber": {"category", "text"},
     "batch_id": {"category", "text"},
     "product_name": {"category", "text"},
+    "unit_cost": {"number"},
+    "total_cost": {"number"},
+    "net_profit": {"number"},
+    "stock_on_hand": {"number"},
+    "event_type": {"category", "text"},
+    "waste_quantity": {"number"},
 }
 
 
@@ -171,6 +212,9 @@ def classify_dataframe(df: pd.DataFrame) -> dict:
     for field in CANONICAL_FIELD_SYNONYMS:
         if suggested[field] is not None:
             content_scores[field] = header_scores[field]
+            continue
+        if field in HEADER_ONLY_FIELDS:
+            content_scores[field] = 0.0
             continue
         allowed = FIELD_VALUE_KINDS.get(field, set())
         best_c = 0.0
