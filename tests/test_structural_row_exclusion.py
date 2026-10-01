@@ -221,8 +221,13 @@ def test_client_projection_states_the_excluded_rows(client):
     assert "2,485 of 2,579" in branch["Rows analysed"]
     assert "94 structural row(s)" in branch["Rows excluded"]
 
-    gaps = " ".join(r.json().get("Evidence gaps") or [])
-    assert "94 of 2,579 source rows" in gaps
+    # `Evidence gaps` is a tagged `$notes` node now, so the assertion has to read
+    # the records rather than the old flat list of sentences. The point of the
+    # test is unchanged: the excluded rows must be stated, in the detail text
+    # a reviewer actually sees.
+    gaps = r.json()["Evidence gaps"]
+    assert gaps["$notes"], "evidence gaps node carries no notes"
+    assert "94 of 2,579 source rows" in " ".join(n["Detail"] for n in gaps["$notes"])
 
 
 def test_weak_fuzzy_match_cannot_become_revenue():

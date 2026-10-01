@@ -75,17 +75,50 @@ def _client_report(client, app_id, analysis_id):
     return r.json()
 
 
-def _walk(node, path="root"):
+# The tag keys that mark a subtree as a chart, forecast or note list. Everything
+# under one of these is drawn rather than tabulated, so it is allowed to hold
+# objects where a plain branch may only hold scalars.
+TAGGED_KEYS = ("$chart", "$forecast", "$notes")
+
+
+def _find_tagged(node, tag):
+    """Every subtree in `node` carrying `tag`, at any depth.
+
+    Chart and forecast placement depends on which columns the engine found, so
+    the tests assert on presence and shape rather than on a fixed path.
+    """
+    found: list[dict] = []
+
+    def visit(current):
+        if isinstance(current, dict):
+            if tag in current:
+                found.append(current)
+            for value in current.values():
+                visit(value)
+        elif isinstance(current, list):
+            for item in current:
+                visit(item)
+
+    visit(node)
+    return found
+
+
+def _walk(node, path="root", tagged=False):
     """Yield (path, value) for every leaf so shape rules can be asserted once."""
     if isinstance(node, dict):
+        now_tagged = tagged or any(k in node for k in TAGGED_KEYS)
         for key, val in node.items():
-            yield from _walk(val, f"{path}.{key}")
+            yield from _walk(val, f"{path}.{key}", now_tagged)
     elif isinstance(node, list):
-        assert all(isinstance(i, (str, int, float, bool)) for i in node), (
-            f"{path} holds non-scalar list items: {node!r}"
-        )
+        # A list of objects is only legitimate inside a tagged subtree (a chart's
+        # series, a note's records). Untagged, the old flat-renderer assumption
+        # holds and an object here would render as "[object Object]".
+        if not tagged:
+            assert all(isinstance(i, (str, int, float, bool)) for i in node), (
+                f"{path} holds non-scalar list items outside a tagged node: {node!r}"
+            )
         for idx, val in enumerate(node):
-            yield from _walk(val, f"{path}[{idx}]")
+            yield from _walk(val, f"{path}[{idx}]", tagged)
     else:
         yield path, node
 
@@ -261,7 +294,10 @@ class TestClientProjectionShape:
             },
             {"file_count": 1},
         )
-        assert proj["Files"]["bad.xlsx"]["Read errors"] == ["unreadable"]
+        notes = proj["Files"]["bad.xlsx"]["Caveats"]["$notes"]
+        assert notes == [
+        {"Severity": "critical", "Subject": "Read error", "Detail": "unreadable"}
+    ]
 
     def test_per_file_findings_count_is_a_number_not_none(self, client):
         """Per-file Findings has to agree with the headline.
@@ -453,3 +489,189 @@ def _xlsx_bytes():
             writer, sheet_name="Prescriptions", index=False
         )
     return buf.getvalue()
+
+
+class TestClientProjectionRichNodes:
+    """Charts, forecasts and notes must arrive as drawable, tagged subtrees.
+
+    The projection is a recursive label->value tree, so anything richer than a
+    scalar has to be expressed as tagged objects the client recognises. A chart
+    that arrives untagged degrades to a list of strings -- which is exactly what
+    this feature replaced -- so these assertions are about the tag being present
+    and well-formed, not about the underlying engine.
+    """
+
+    # Consecutive calendar days from 2026-01-01, so the trend insight resamples
+    # to weeks (the span exceeds a couple of months) and produces a series long
+    # enough to clear the forecast floor. Random dates would cluster into fewer
+    # buckets and could leave the series too short to project.
+    LONG_SALES_CSV = (
+        "sale_timestamp,transaction_ref,product_name,quantity,unit_price,total_amount\n"
+        + "\n".join(
+            f"2026-{(i // 28) + 1:02d}-{(i % 28) + 1:02d},TX-{i:03d},"
+            f"Product {i % 5},{i % 7 + 1},{10 + i % 3}.50,"
+            f"{float((i % 7 + 1) * (10 + i % 3) + 50 + i)}"
+            for i in range(140)
+        )
+        + "\n"
+    )
+
+    def _projection_for(self, client, csv, filename="sales.csv"):
+        body = _upload(client, csv=csv, filename=filename)
+        apps = client.get("/api/v1/applications", headers=api_headers()).json()["applications"]
+        return _client_report(client, apps[0]["id"], body["analysis_id"])
+
+    def test_bar_groups_arrive_as_tagged_charts(self, client):
+        proj = self._projection_for(client, self.LONG_SALES_CSV)
+
+        # Walk for `$chart` markers rather than guessing where the engine puts
+        # them -- the section titles come from the data's own column names.
+        found = _find_tagged(proj, "$chart")
+        assert found, "no $chart node in a projection that has bar groups"
+
+        for node in found:
+            assert node["$chart"] in ("bar", "table")
+            if node["$chart"] == "bar":
+                assert len(node["Bars"]) >= 2
+                for bar in node["Bars"]:
+                    assert set(bar) == {"Label", "Value", "Share"}
+            else:
+                assert node["Columns"] and node["Rows"]
+
+    def test_chart_bar_count_is_bounded(self, client):
+        """The projection is jsonb read on every panel open; charts cannot grow unbounded."""
+        proj = self._projection_for(client, self.LONG_SALES_CSV)
+        from app.analytics_service.reporting import CLIENT_BAR_MAX
+
+        for chart in _find_tagged(proj, "$chart"):
+            if chart["$chart"] != "bar":
+                continue
+            assert len(chart["Bars"]) <= CLIENT_BAR_MAX
+
+    def test_forecast_node_carries_method_confidence_and_interval(self, client):
+        proj = self._projection_for(client, self.LONG_SALES_CSV)
+
+        nodes = _find_tagged(proj, "$forecast")
+        assert nodes, "no $forecast node for a file with a long dated revenue series"
+
+        node = nodes[0]
+        # The fields a reader needs to not over-trust the curve.
+        assert node["$forecast"] is True
+        assert node["Method"]
+        assert node["Method note"]
+        assert "interval" in node["Confidence"]
+        assert node["History"] and node["Projected"]
+        for point in node["Projected"]:
+            # Every projected point carries its interval bounds.
+            assert set(point) == {"Period", "Value", "Low", "High"}
+
+    def test_forecast_absent_without_a_dated_series(self, client):
+        """No date column means no forecast, rather than a flat meaningless one."""
+        proj = build_client_projection(
+            {
+                "application_name": "undated",
+                "files": [
+                    {
+                        "filename": "static.csv",
+                        "row_count": 10,
+                        "profile": {"columns": [{"name": "amount", "kind": "number"}]},
+                        "domain": {"kpis": []},
+                        "insights": {"groups": [], "notes": []},
+                    }
+                ],
+            },
+            {"file_count": 1},
+        )
+        assert "Forecast" not in proj["Files"]["static.csv"]
+
+    def test_category_confidence_is_a_chart_not_flat_text(self, client):
+        proj = self._projection_for(client, self.LONG_SALES_CSV)
+        conf = proj["Files"]["sales.csv"]["Category confidence"]
+        assert conf["$chart"] == "bar"
+        assert len(conf["Bars"]) >= 2
+        assert all(bar["Share"].endswith("%") for bar in conf["Bars"])
+
+    def test_notes_are_tagged_with_severity(self, client):
+        proj = build_client_projection(
+            {
+                "application_name": "gappy",
+                "files": [
+                    {
+                        "filename": "messy.csv",
+                        "row_count": 100,
+                        "errors": ["could not read sheet 2"],
+                        "row_filter": {
+                            "dropped_rows": 12,
+                            "source_rows": 112,
+                            "kept_rows": 100,
+                        },
+                    }
+                ],
+            },
+            {"file_count": 1},
+        )
+        notes = proj["Files"]["messy.csv"]["Caveats"]["$notes"]
+        severities = {n["Severity"] for n in notes}
+        assert "critical" in severities  # the read error
+        assert "info" in severities  # the structural-row exclusion
+        for note in notes:
+            assert set(note) == {"Severity", "Subject", "Detail"}
+            assert note["Subject"] and note["Detail"]
+
+    def test_evidence_gaps_are_notes_not_a_bare_list(self, client):
+        proj = build_client_projection(
+            {
+                "application_name": "filtered",
+                "files": [
+                    {
+                        "filename": "inv.csv",
+                        "row_count": 200,
+                        "row_filter": {
+                            "dropped_rows": 94,
+                            "source_rows": 2579,
+                            "kept_rows": 2485,
+                        },
+                    }
+                ],
+            },
+            {"file_count": 1},
+        )
+        gaps = proj["Evidence gaps"]
+        assert "$notes" in gaps
+        assert "94" in gaps["$notes"][0]["Detail"]
+
+    def test_ingestion_notes_survive_as_caveats(self, client):
+        """How the table was located is part of what bounds the numbers.
+
+        These used to be rendered as a flat `Structural notes` list. Dropping
+        them on the way to `$notes` would have silently removed the only signal
+        that a sheet was reconstructed rather than read straight off.
+        """
+        proj = build_client_projection(
+            {
+                "application_name": "reconstructed",
+                "files": [
+                    {
+                        "filename": "report.csv",
+                        "row_count": 40,
+                        "notes": [
+                            "repeated-block report: distinct sections in one sheet; "
+                            "extracted as a best-effort flat table",
+                            "report-table discovery: header row at row 4, 6 columns, 40 data rows",
+                        ],
+                    }
+                ],
+            },
+            {"file_count": 1},
+        )
+        notes = proj["Files"]["report.csv"]["Caveats"]["$notes"]
+        details = " ".join(n["Detail"] for n in notes)
+        assert "repeated-block report" in details
+        assert "header row at row 4" in details
+        # Ingestion notes are descriptive, not warnings.
+        assert all(n["Severity"] == "info" for n in notes)
+
+    def test_projection_still_has_no_object_leaves_outside_tags(self, client):
+        proj = self._projection_for(client, self.LONG_SALES_CSV)
+        for path, value in _walk(proj):
+            assert isinstance(value, (str, int, float, bool, type(None))), path

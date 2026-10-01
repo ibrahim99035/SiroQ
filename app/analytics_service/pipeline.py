@@ -3,17 +3,41 @@ produces the JSON-safe report + summary document that gets persisted.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date as dt_date, datetime, timezone
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from app.analytics_service import analytics, classification, ingestion, insights, profile, quality
+from app.analytics_service import (
+    analytics,
+    classification,
+    forecast as forecast_engine,
+    ingestion,
+    insights,
+    profile,
+    quality,
+)
 from app.analytics_service.registry import file_analyzer, file_analyzers
 from app.analytics_service.storage import read_bytes
 
 ENGINE_VERSION = "0.1.0"
+
+# How far to project, and the shortest series worth projecting. The engine fits
+# every registered model and scores them on a holdout slice, so a handful of
+# points produces a confident-looking curve from noise. Below the floor we emit
+# no forecast rather than a flattering one.
+CLIENT_FORECAST_HORIZON = 6
+CLIENT_FORECAST_MIN_POINTS = 6
+
+
+def _num(value: Any) -> bool:
+    """True when `value` is a finite real number."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return False
+    return f == f and f not in (float("inf"), float("-inf"))
 
 
 @file_analyzer("profile", order=10)
@@ -80,6 +104,77 @@ def _stage_insights(df, ctx):
     )
 
 
+def _trend_series(ctx) -> tuple[str, list, list] | None:
+    """Pull the primary time series out of the trend insights, if any ran.
+
+    The trend rules already resample revenue into a dated series as part of
+    computing the growth numbers, so the series is there in ``evidence``. Reading
+    it back is cheaper and more consistent than re-deriving it: the forecast then
+    forecasts exactly the series the report quotes in its trend insight.
+
+    Revenue wins over volume when both are present -- a forecast of sales is the
+    decision a reviewer acts on, and volume is a secondary read on the same rows.
+    """
+    for key in ("revenue_trend", "volume_trend"):
+        for item in ctx.get("insights") or []:
+            if item.get("key") != key or item.get("status") != "ok":
+                continue
+            series = (item.get("evidence") or {}).get("series") or []
+            dates = [str(p.get("period")) for p in series if p.get("period")]
+            values = [p.get("value") for p in series]
+            # `_trend` refuses to report on fewer than 3 periods, so anything
+            # reaching here is already long enough to have a shape.
+            if len(values) >= 3 and len(dates) == len(values):
+                label = "Revenue" if key == "revenue_trend" else "Units sold"
+                return label, dates, [float(v) for v in values if _num(v)]
+    return None
+
+
+@file_analyzer("forecast", order=60)
+def _stage_forecast(df, ctx):
+    """Statistically project the file's primary time series.
+
+    Runs after ``insights`` so it can reuse the series they already built.
+    Deliberately one series per file: the point is a forward read on the
+    headline number, not a forecast of every column. A file with no usable
+    series gets no forecast node at all rather than a flat, meaningless one.
+    """
+    picked = _trend_series(ctx)
+    if not picked:
+        ctx["forecast"] = None
+        return
+    label, dates, values = picked
+    # The engine caps the history it keeps at 24 points, so a two-year file and a
+    # six-week file both arrive here with the same series length. The floor is
+    # about how much shape there is to project, so it counts what we pass in.
+    if len(values) < CLIENT_FORECAST_MIN_POINTS:
+        ctx["forecast"] = None
+        return
+    result = forecast_engine.forecast(values, dates=dates, horizon=CLIENT_FORECAST_HORIZON)
+    result["series_label"] = label
+    result["granularity"] = _granularity_of(ctx, dates)
+    ctx["forecast"] = result
+
+
+def _granularity_of(ctx, dates: list) -> str:
+    """How far apart the observations are, as a word the client can label with."""
+    granularity = None
+    for item in ctx.get("insights") or []:
+        if item.get("key") in ("revenue_trend", "volume_trend") and item.get("status") == "ok":
+            granularity = (item.get("evidence") or {}).get("granularity")
+            break
+    if granularity:
+        return str(granularity)
+    try:
+        return {1: "day", 7: "week", 30: "month"}.get(
+            (dt_date.fromisoformat(dates[-1]) - dt_date.fromisoformat(dates[0])).days
+            // max(1, len(dates) - 1),
+            "period",
+        )
+    except (ValueError, IndexError):
+        return "period"
+
+
 def _run_stages(df, ctx) -> None:
     """Execute every registered analysis stage in order on the shared ctx."""
     for entry in file_analyzers.all():
@@ -114,6 +209,7 @@ def _analyze_dataframe(df, *, sheet=None) -> dict[str, Any]:
         sub["insights"] = []
         sub["errors"] = ["sheet unreadable or empty"] if df is None else []
         sub["top_category"] = None
+        sub["forecast"] = None
         return sub
 
     ctx: dict[str, Any] = {}
@@ -130,6 +226,7 @@ def _analyze_dataframe(df, *, sheet=None) -> dict[str, Any]:
     sub["domain_analytics"] = ctx["domain_analytics"]
     sub["insights"] = ctx.get("insights", [])
     sub["row_filter"] = ctx.get("transactional_rows")
+    sub["forecast"] = ctx.get("forecast")
     return sub
 
 

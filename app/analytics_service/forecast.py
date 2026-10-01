@@ -351,9 +351,25 @@ def forecast(
 
     parsed = [_parse_datetime(p[0]) for p in pairs]
 
+    # The observation step. Projecting by `timedelta(days=s + 1)` regardless of
+    # how far apart the observations actually are labels a monthly series as 14
+    # consecutive days, which reads as a real forecast and is not one. Infer the
+    # median spacing so weekly and monthly series keep their own cadence. Monthly
+    # spacing is not constant (28-31 days), so a fixed step still drifts by a few
+    # days over a long horizon; the values are unaffected, only the date labels.
+    _steps = [
+        (parsed[i + 1] - parsed[i]).days
+        for i in range(len(parsed) - 1)
+        if parsed[i] is not None and parsed[i + 1] is not None
+    ]
+    _steps = [s for s in _steps if s > 0]
+    step_days = sorted(_steps)[len(_steps) // 2] if _steps else 1
+
     def _season(i: int) -> int:
         if parsed and parsed[0] is not None:
-            base = parsed[0] + timedelta(days=i)
+            # Index -> calendar offset must use the observed step too, or a
+            # weekly series gets a seven-day seasonal cycle applied per point.
+            base = parsed[0] + timedelta(days=i * step_days)
             return base.weekday()
         return (i % max(2, int(period)))
 
@@ -431,7 +447,7 @@ def forecast(
             hi = max(lo, hi)
         forecast_row.append({
             "step": s + 1,
-            "date": (parsed[-1] + timedelta(days=s + 1))
+            "date": (parsed[-1] + timedelta(days=step_days * (s + 1)))
             if parsed and parsed[-1] is not None else (n + s),
             "value": round(v, 4),
             "lower": round(lo, 4),
@@ -456,6 +472,7 @@ def forecast(
         "r2": _r2(ys, fitted),
         "slope": round(slope, 6) if slope is not None else None,
         "points": n,
+        "step_days": step_days,
         "notes": notes,
     }
     if winner and holdout_errors.get(winner) is not None:

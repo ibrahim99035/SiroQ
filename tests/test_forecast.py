@@ -73,6 +73,42 @@ class TestEngine:
         r = fc.forecast([float(i) for i in range(30)], dates=dates, horizon=5)
         assert r["forecast"][0]["date"].strftime("%Y-%m-%d") == "2026-01-31"
 
+    def test_projection_step_follows_the_series_granularity(self):
+        """A weekly series must project a week at a time, not a day.
+
+        Projecting every step as `last + s + 1 days` labelled a weekly series
+        as consecutive days, so the chart drew a forecast that contradicted the
+        history it sat next to.
+        """
+        import datetime
+        start = datetime.date(2026, 1, 5)
+        dates = [(start + datetime.timedelta(weeks=i)).isoformat() for i in range(20)]
+        values = [100.0 + 5 * i for i in range(20)]
+
+        weekly = fc.forecast(values, dates=dates, horizon=4)
+        assert weekly["diagnostics"]["step_days"] == 7
+        projected = [p["date"] for p in weekly["forecast"]]
+        gaps = {
+            (projected[i + 1] - projected[i]).days for i in range(len(projected) - 1)
+        }
+        assert gaps == {7}
+        # Still a week past the last observation, not a day.
+        assert (projected[0] - datetime.datetime.strptime(dates[-1], "%Y-%m-%d")).days == 7
+
+    def test_daily_step_unchanged(self):
+        import datetime
+        start = datetime.date(2026, 1, 1)
+        dates = [(start + datetime.timedelta(days=i)).isoformat() for i in range(30)]
+        r = fc.forecast([float(i) for i in range(30)], dates=dates, horizon=3)
+        assert r["diagnostics"]["step_days"] == 1
+        assert r["forecast"][0]["date"].strftime("%Y-%m-%d") == "2026-01-31"
+
+    def test_dateless_series_still_forecasts(self):
+        """No parseable dates: nothing to infer a step from, so default to 1."""
+        r = fc.forecast([float(i) for i in range(20)], dates=None, horizon=3)
+        assert r["diagnostics"]["step_days"] == 1
+        assert len(r["forecast"]) == 3
+
 
 SALES_CSV = (
     "sale_date,amount,payment_method\n"

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.analytics_service.forecast import describe as forecast_describe
+
 
 def _num(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -382,6 +384,9 @@ def build_file_model(f: Any) -> dict:
         "multi_sheet": f.get("multi_sheet", False),
         "sheet_categories": f.get("sheet_categories") or [],
         "row_filter": f.get("row_filter"),
+        # Carried so `_file_projection` can emit the forecast node. Omitted here
+        # would leave the whole forecasting stage invisible to the report.
+        "forecast": f.get("forecast"),
     }
     if f.get("multi_sheet") and f.get("sheets"):
         model["rows"] = [
@@ -416,6 +421,16 @@ def build_file_model(f: Any) -> dict:
     return model
 
 
+#: Schema version stamped into every projection.
+#:
+#: Version `v1` covers the *tagged-node* extension to the label->value tree (see
+#: `docs/CLIENT_REPORT_CONTRACT.md`): `$chart`, `$forecast` and `$notes`. Those
+#: tags are additive, so a document written by this engine still renders as a
+#: plain tree on a panel that predates them, and a document without them still
+#: renders as a plain tree here. That is why the version did not change when the
+#: tags were added -- a bump would be a claim of incompatibility that does not
+#: exist, and the client's `KNOWN_SCHEMA_VERSION` drift warning is only useful
+#: while it stays quiet for documents we actually do render.
 CLIENT_SCHEMA_VERSION = "siroq.client.v1"
 
 
@@ -455,8 +470,148 @@ def _agg_severity(models: list[dict]) -> str:
 
 
 def _bar_lines(bar_group: dict) -> list[str]:
-    """Flatten a `{title, bars[]}` group into 'label — value' strings."""
+    """Flatten a `{title, bars[]}` group into 'label — value' strings.
+
+    Kept for the printable report and the dashboard, which render text. The
+    client projection uses `_bar_chart` so it can draw the same data.
+    """
     return [f"{b['label']} — {_fmt(b['value'])}" for b in bar_group.get("bars", [])]
+
+
+# Number of bars to send to the client. The printable report and dashboard cap at
+# the same 12, and a chart with 40 slivers is less readable than a table would be.
+CLIENT_BAR_MAX = 12
+
+
+def _bar_chart(bar_group: dict) -> dict[str, Any] | None:
+    """A `{title, bars[]}` group as a tagged node the client renders as a chart.
+
+    The projection is a recursive label->value tree, so a chart has to arrive as
+    an ordinary object. Tagging it with ``$chart`` lets the client renderer swap
+    in an SVG without the service knowing anything about the client's internals,
+    and a client that predates the tag still renders the object as plain fields
+    rather than failing.
+    """
+    taken = [b for b in (bar_group.get("bars") or []) if b.get("label")][:CLIENT_BAR_MAX]
+    if len(taken) < 2:
+        # One bar is not a chart. Leave it to the caller's flat rendering.
+        return None
+    return {
+        "$chart": "bar",
+        "Total": _fmt(sum(float(b.get("value") or 0) for b in taken)),
+        "Bars": [
+            {
+                "Label": str(b["label"]),
+                "Value": _fmt(b.get("value")),
+                "Share": f"{float(b.get('pct') or 0):.1f}%",
+            }
+            for b in taken
+        ],
+    }
+
+
+# Points of history to send with a forecast. The engine keeps at most 24; the
+# projection is stored as jsonb and read on every panel open, and a chart of 24
+# points at ~7px each already fills its width.
+CLIENT_FORECAST_POINTS = 18
+
+
+def _forecast_node(fc: dict | None) -> dict[str, Any] | None:
+    """A forecast as a tagged node the client draws as history + projection.
+
+    Carries the confidence interval and the method that won, because a curve
+    without them invites exactly the reading the projection exists to prevent:
+    a point estimate presented as a promise. When the fit was poor the notes say
+    so in the panel itself rather than leaving it to the reader to infer from a
+    wiggly line.
+    """
+    if not isinstance(fc, dict):
+        return None
+    series = [p for p in (fc.get("series") or []) if _num(p.get("value"))]
+    projected = [p for p in (fc.get("forecast") or []) if _num(p.get("value"))]
+    if not series or not projected:
+        return None
+
+    def _day(value: Any) -> str:
+        text = str(value)[:10]
+        return text if len(text) == 10 else ""
+
+    history = [
+        {"Period": _day(p.get("date")), "Value": _fmt(p.get("value"))}
+        for p in series[-CLIENT_FORECAST_POINTS:]
+    ]
+    future = [
+        {
+            "Period": _day(p.get("date")),
+            "Value": _fmt(p.get("value")),
+            "Low": _fmt(p.get("lower")),
+            "High": _fmt(p.get("upper")),
+        }
+        for p in projected
+    ]
+
+    diag = fc.get("diagnostics") or {}
+    method = fc.get("method")
+    node: dict[str, Any] = {
+        "$forecast": True,
+        "Series": fc.get("series_label") or "Value",
+        "Granularity": fc.get("granularity") or "period",
+        "Method": method or "n/a",
+        "Method note": forecast_describe(method) if method else "No method was selected.",
+        "Confidence": f"{int(round(float(fc.get('confidence') or 0.9) * 100))}% interval",
+        "Horizon": f"{len(projected)} {fc.get('granularity') or 'period'}s ahead",
+        "History": history,
+        "Projected": future,
+    }
+
+    # Accuracy, but only where the numbers mean something. r2 is meaningless on a
+    # short or near-flat series, and MAPE explodes when the actuals approach zero.
+    accuracy: dict[str, str] = {}
+    if _num(diag.get("rmse")):
+        accuracy["Error (RMSE)"] = _fmt(diag["rmse"])
+    if _num(diag.get("mape")) and 0 <= float(diag["mape"]) < 1000:
+        accuracy["Typical error"] = f"{float(diag['mape']):.1f}%"
+    if _num(diag.get("r2")):
+        accuracy["Fit (R²)"] = f"{float(diag['r2']):.2f}"
+    if accuracy:
+        node["Accuracy"] = accuracy
+
+    notes = [str(n) for n in (diag.get("notes") or []) if n]
+    if notes:
+        node["Notes"] = notes
+    return node
+
+
+def _table_chart(table: dict) -> dict[str, Any] | None:
+    """A `{title, columns[], rows[]}` table as a tagged node.
+
+    Tables are already structured, so the client can lay them out as a real grid
+    instead of one pre-joined string per row. Row and column counts are bounded
+    because the projection is stored as jsonb and read on every panel open.
+    """
+    # `_interpret_domain` emits `headers` + list-of-lists `rows`; `_table_lines`
+    # reads `columns` + list-of-dicts, so accept either rather than silently
+    # dropping every table when only one producer is in play.
+    cols = table.get("headers") or table.get("columns") or []
+    cols = [str(c) for c in cols][:6]
+    raw_rows = table.get("rows") or []
+    rows: list[list[str]] = []
+    for row in raw_rows[:25]:
+        if isinstance(row, dict):
+            cells = [rfmt(row.get(c)) for c in cols]
+        elif isinstance(row, (list, tuple)):
+            cells = [rfmt(c) for c in row][: len(cols)]
+        else:
+            continue
+        if any(c not in (None, "") for c in cells):
+            rows.append([str(c) for c in cells])
+    if not cols or not rows:
+        return None
+    return {
+        "$chart": "table",
+        "Columns": cols,
+        "Rows": rows,
+    }
 
 
 def _table_lines(table: dict) -> list[str]:
@@ -530,13 +685,25 @@ def _file_projection(f: Any, model: dict) -> dict:
     if isinstance(raw_domain, dict) and raw_domain.get("margin_basis"):
         domain["Margin basis"] = rfmt(raw_domain["margin_basis"])
     for bar_group in dm.get("bars") or []:
+        title = str(bar_group.get("title") or "Breakdown")
+        # Two or more bars go to the client as a chart; a single bar stays a
+        # flat value, because a one-row bar chart draws nothing a number does not.
+        node = _bar_chart(bar_group)
+        if node is not None:
+            domain[title] = node
+            continue
         lines = _bar_lines(bar_group)
         if lines:
-            domain[str(bar_group.get("title") or "Breakdown")] = lines
+            domain[title] = lines
     for table in dm.get("tables") or []:
+        title = str(table.get("title") or "Table")
+        node = _table_chart(table)
+        if node is not None:
+            domain[title] = node
+            continue
         lines = _table_lines(table)
         if lines:
-            domain[str(table.get("title") or "Table")] = lines
+            domain[title] = lines
     if dm.get("skipped"):
         domain["Not analyzed"] = " · ".join(str(s) for s in dm["skipped"])
 
@@ -549,12 +716,22 @@ def _file_projection(f: Any, model: dict) -> dict:
         insights[str(group.get("title") or "Insights")] = {
             f"{i.get('label')}": rfmt(i.get("value")) for i in items if i.get("label")
         }
+    # Skipped insight rules are limitations on the report, not results, so they
+    # get their own tagged list rather than being buried as a sibling of the
+    # insights that did compute.
+    insight_notes: list[dict[str, Any]] = []
     for note in im.get("notes") or []:
         missing = note.get("missing") or ""
-        insights[f"Skipped — {note.get('label')}"] = (
-            f"{note.get('detail') or note.get('status')}"
-            + (f" (needs: {missing})" if missing else "")
-        )
+        insight_notes.append({
+            "Severity": "warn",
+            "Subject": f"Skipped — {note.get('label')}",
+            "Detail": (
+                f"{note.get('detail') or note.get('status')}"
+                + (f" (needs: {missing})" if missing else "")
+            ),
+        })
+    if insight_notes:
+        insights["Not computed"] = {"$notes": insight_notes}
 
     columns: dict[str, Any] = {}
     for row in (model.get("profile_rows") or [])[:40]:
@@ -578,11 +755,37 @@ def _file_projection(f: Any, model: dict) -> dict:
         "Columns": rfmt(model.get("column_count")),
         "Size": f"{_fmt(model.get('size_bytes') or 0)} bytes",
         "Detected category": rfmt(model.get("top_category")),
-        "Category confidence": [
-            f"{b['label']} — {b['pct']}%" for b in (model.get("category_bars") or [])
-        ],
         "Quality": quality,
     }
+
+    # The category bars are already `{label, pct}` pairs -- structured chart data
+    # that was being flattened to text purely because the client had no way to
+    # draw it. Keep them structured now that it does.
+    confidence = model.get("category_bars") or []
+    if len(confidence) >= 2:
+        branch["Category confidence"] = {
+            "$chart": "bar",
+            "Bars": [
+                {
+                    "Label": str(b.get("label")),
+                    "Value": f"{_num(b.get('pct')) and b['pct'] or 0:.1f}%",
+                    "Share": f"{_num(b.get('pct')) and b['pct'] or 0:.1f}%",
+                }
+                for b in confidence[:CLIENT_BAR_MAX]
+            ],
+        }
+    elif confidence:
+        branch["Category confidence"] = [
+            f"{b['label']} — {b['pct']}%" for b in confidence
+        ]
+
+    forecast_node = _forecast_node(model.get("forecast"))
+    if forecast_node is not None:
+        branch["Forecast"] = forecast_node
+
+    # A file with no sales date column produces no forecast, and the absence is
+    # the finding -- silently omitting it reads as "nothing to say" rather than
+    # "we could not project this file".
 
     # Say plainly when "Rows" is not every row the file contained. Structural
     # report rows are excluded from the money aggregates, so without this the
@@ -609,10 +812,35 @@ def _file_projection(f: Any, model: dict) -> dict:
         branch["Insights"] = insights
     if columns:
         branch["Column profile"] = columns
-    if model.get("errors"):
-        branch["Read errors"] = list(model["errors"])
-    if model.get("notes"):
-        branch["Structural notes"] = list(model["notes"])
+    # A file that could not be fully read, or that had structural rows stripped,
+    # are the two things most likely to make a reviewer over-trust a number.
+    # Both go in as notes so they read as caveats rather than as data.
+    problem_notes: list[dict[str, Any]] = []
+    for err in model.get("errors") or []:
+        problem_notes.append({"Severity": "critical", "Subject": "Read error", "Detail": str(err)})
+    # Ingestion notes record how the sheet was located and shaped (header row,
+    # repeated blocks, discarded spacers). They are not warnings, but a reviewer
+    # reading only the numbers would otherwise have no way to know the table was
+    # reconstructed rather than read straight off the sheet.
+    for note in model.get("notes") or []:
+        problem_notes.append({
+            "Severity": "info",
+            "Subject": "How this table was read",
+            "Detail": str(note),
+        })
+    if row_filter.get("dropped_rows"):
+        problem_notes.append({
+            "Severity": "info",
+            "Subject": "Structural rows",
+            "Detail": (
+                f"{_fmt(row_filter['dropped_rows'])} of "
+                f"{_fmt(row_filter.get('source_rows') or 0)} rows had no product "
+                "identity and no money value, so they are excluded from every "
+                "money metric in this file"
+            ),
+        })
+    if problem_notes:
+        branch["Caveats"] = {"$notes": problem_notes}
     return branch
 
 
@@ -708,23 +936,35 @@ def build_client_projection(
             if label
         }
 
-    not_analyzed = []
+    notes: list[dict[str, Any]] = []
     for (f, m), label in zip(pairs, labels):
         skipped = ((m.get("domain") or {}).get("skipped")) or []
         if skipped:
-            not_analyzed.append(f"{label} — {'; '.join(str(s) for s in skipped)}")
+            notes.append({
+                "Severity": "warn",
+                "Subject": label,
+                "Detail": f"Not analyzed: {'; '.join(str(s) for s in skipped)}",
+            })
         row_filter = m.get("row_filter") or {}
         if row_filter.get("dropped_rows"):
-            not_analyzed.append(
-                f"{label} — {_fmt(row_filter['dropped_rows'])} of "
-                f"{_fmt(row_filter.get('source_rows') or 0)} source rows are "
-                "structural (blank spacer or repeated invoice header) and are "
-                "excluded from the money metrics above"
-            )
+            notes.append({
+                "Severity": "info",
+                "Subject": label,
+                "Detail": (
+                    f"{_fmt(row_filter['dropped_rows'])} of "
+                    f"{_fmt(row_filter.get('source_rows') or 0)} source rows are "
+                    "structural (blank spacer or repeated invoice header) and are "
+                    "excluded from the money metrics above"
+                ),
+            })
         if row_filter.get("reason") and not row_filter.get("dropped_rows"):
-            not_analyzed.append(f"{label} — {row_filter['reason']}")
-    if not_analyzed:
-        projection["Evidence gaps"] = not_analyzed
+            notes.append({
+                "Severity": "warn",
+                "Subject": label,
+                "Detail": str(row_filter["reason"]),
+            })
+    if notes:
+        projection["Evidence gaps"] = {"$notes": notes}
 
     return projection
 
