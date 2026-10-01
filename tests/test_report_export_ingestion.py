@@ -77,7 +77,9 @@ def test_report_table_is_discovered_and_mapped():
     assert ing.errors == []
     df = ing.dataframe
     assert ing.notes == [
-        "Sheet1: report-table discovery: header row at row 3, 9 columns, 4 data rows"
+        "Sheet1: report-table discovery: header row at row 3, 9 columns, 4 data rows",
+        "Sheet1: 2 of 6 populated source row(s) were blank spacer or "
+        "repeated-header rows and are not counted as data",
     ]
     assert list(df.columns) == [
         "net_profit",

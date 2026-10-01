@@ -171,8 +171,11 @@ def _profile_rows(profile: Any) -> list[dict]:
         return []
     rows = []
     for col in profile["column_profiles"]:
+        # the engine may key a column as ``column`` or ``name`` depending on
+        # whether it came from the profile or a sheet-level projection
+        name = col.get("name") or col.get("column")
         row: dict[str, Any] = {
-            "name": col.get("name"),
+            "name": name,
             "dtype": col.get("dtype"),
             "kind": col.get("kind"),
             "null_pct": _fmt(col.get("null_pct", 0)),
@@ -378,6 +381,7 @@ def build_file_model(f: Any) -> dict:
         "top_category": f.get("top_category"),
         "multi_sheet": f.get("multi_sheet", False),
         "sheet_categories": f.get("sheet_categories") or [],
+        "row_filter": f.get("row_filter"),
     }
     if f.get("multi_sheet") and f.get("sheets"):
         model["rows"] = [
@@ -410,6 +414,319 @@ def build_file_model(f: Any) -> dict:
         model["domain"] = _interpret_domain(da)
     model["insights"] = build_insight_model(f.get("insights"))
     return model
+
+
+CLIENT_SCHEMA_VERSION = "siroq.client.v1"
+
+
+def _quality_verdict(score: Any, failed: int) -> str:
+    """Turn a quality score into the word a reviewer acts on."""
+    if not _num(score):
+        return "Not scored"
+    s = float(score)
+    if failed:
+        return "Action required"
+    if s >= 90:
+        return "Strong"
+    if s >= 75:
+        return "Acceptable"
+    if s >= 60:
+        return "Review before accepting"
+    return "Action required"
+
+
+def _agg_severity(models: list[dict]) -> str:
+    """Highest severity across all files drives the headline.
+
+    Takes *file models*, whose ``insights`` are already grouped by
+    :func:`build_insight_model`. Re-running the grouper here returned empty
+    groups for that reason, so the headline said "Info" for every application
+    regardless of what the engine actually flagged.
+    """
+    rank = {"critical": 4, "warning": 3, "warn": 3, "info": 1}
+    worst = "info"
+    for m in models:
+        for group in (m.get("insights") or {}).get("groups", []):
+            for item in group.get("items", []):
+                sev = str(item.get("severity") or "info").lower()
+                if rank.get(sev, 0) > rank.get(worst, 0):
+                    worst = sev
+    return worst
+
+
+def _bar_lines(bar_group: dict) -> list[str]:
+    """Flatten a `{title, bars[]}` group into 'label — value' strings."""
+    return [f"{b['label']} — {_fmt(b['value'])}" for b in bar_group.get("bars", [])]
+
+
+def _table_lines(table: dict) -> list[str]:
+    """Flatten a `{title, columns, rows}` table into readable strings."""
+    cols = table.get("columns") or []
+    out = []
+    for row in table.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        cells = [rfmt(row.get(c)) for c in cols if row.get(c) is not None]
+        if cells:
+            out.append(" · ".join(cells))
+    return out
+
+
+def _file_labels(models: list[dict]) -> list[str]:
+    """Unique display names for the per-file branches.
+
+    The client renders `Files` as an object keyed by name, and nothing stops two
+    uploads sharing an original filename — two vendors both send `stock.xls`.
+    Keying on the bare name silently dropped one of them, so the per-file
+    branches stopped reconciling with the headline totals with no visible sign
+    that anything was missing. Repeats are numbered from 2; a unique name is
+    left exactly as it was.
+    """
+    seen: dict[str, int] = {}
+    labels: list[str] = []
+    for m in models:
+        name = str(m.get("filename") or "").strip()
+        if not name:
+            labels.append("")
+            continue
+        seen[name] = seen.get(name, 0) + 1
+        labels.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
+    return labels
+
+
+def _file_projection(f: Any, model: dict) -> dict:
+    """Per-file branch: everything a reviewer needs, nothing they don't."""
+    dq = f.get("data_quality") or {}
+    checks = model.get("checks") or []
+    failed = [c for c in checks if c.get("status") == "fail"]
+    warned = [c for c in checks if c.get("status") == "warn"]
+
+    quality: dict[str, Any] = {
+        "Score": rfmt(model.get("quality_score")),
+        "Verdict": _quality_verdict(model.get("quality_score"), len(failed)),
+        "Checks passed": f"{len(checks) - len(failed) - len(warned)} of {len(checks)}",
+        "Failed checks": ", ".join(c.get("check") or "" for c in failed) or "None",
+        "Warnings": ", ".join(c.get("check") or "" for c in warned) or "None",
+        "Duplicate rows": rfmt(model.get("duplicate_count")),
+        # `build_file_model` stores the findings themselves and never a separate
+        # count, so the count has to come from the list. Reading a non-existent
+        # `findings_count` printed "None" here while the headline reported a
+        # non-zero number — a reviewer drilling into the file that actually had
+        # the findings was told there were none.
+        "Findings": _fmt(len(model.get("findings") or [])),
+    }
+    if model.get("findings"):
+        quality["Finding detail"] = list(model["findings"])
+
+    domain: dict[str, Any] = {}
+    dm = model.get("domain") or {}
+    for kpi in dm.get("kpis") or []:
+        domain[str(kpi.get("label"))] = rfmt(kpi.get("value"))
+
+    # A gross margin can be a currency total or a unit-economics figure
+    # depending on which columns the engine found; state which, or the two
+    # figures read as a contradiction.
+    raw_domain = f.get("domain_analytics") or {}
+    if isinstance(raw_domain, dict) and raw_domain.get("margin_basis"):
+        domain["Margin basis"] = rfmt(raw_domain["margin_basis"])
+    for bar_group in dm.get("bars") or []:
+        lines = _bar_lines(bar_group)
+        if lines:
+            domain[str(bar_group.get("title") or "Breakdown")] = lines
+    for table in dm.get("tables") or []:
+        lines = _table_lines(table)
+        if lines:
+            domain[str(table.get("title") or "Table")] = lines
+    if dm.get("skipped"):
+        domain["Not analyzed"] = " · ".join(str(s) for s in dm["skipped"])
+
+    insights: dict[str, Any] = {}
+    im = model.get("insights") or {}
+    for group in im.get("groups") or []:
+        items = group.get("items") or []
+        if not items:
+            continue
+        insights[str(group.get("title") or "Insights")] = {
+            f"{i.get('label')}": rfmt(i.get("value")) for i in items if i.get("label")
+        }
+    for note in im.get("notes") or []:
+        missing = note.get("missing") or ""
+        insights[f"Skipped — {note.get('label')}"] = (
+            f"{note.get('detail') or note.get('status')}"
+            + (f" (needs: {missing})" if missing else "")
+        )
+
+    columns: dict[str, Any] = {}
+    for row in (model.get("profile_rows") or [])[:40]:
+        name = row.get("name")
+        if not name:
+            continue
+        entry = {
+            "Type": row.get("dtype") or row.get("kind") or "unknown",
+            "Nulls": row.get("null_pct"),
+            "Unique": row.get("unique_pct"),
+        }
+        if row.get("stats"):
+            entry["Statistics"] = row["stats"]
+        if row.get("top_values"):
+            entry["Most frequent"] = row["top_values"]
+        columns[str(name)] = entry
+
+    branch: dict[str, Any] = {
+        "Type": rfmt(model.get("file_type")),
+        "Rows": rfmt(model.get("row_count")),
+        "Columns": rfmt(model.get("column_count")),
+        "Size": f"{_fmt(model.get('size_bytes') or 0)} bytes",
+        "Detected category": rfmt(model.get("top_category")),
+        "Category confidence": [
+            f"{b['label']} — {b['pct']}%" for b in (model.get("category_bars") or [])
+        ],
+        "Quality": quality,
+    }
+
+    # Say plainly when "Rows" is not every row the file contained. Structural
+    # report rows are excluded from the money aggregates, so without this the
+    # row count reads as full coverage when it is a filtered view.
+    row_filter = model.get("row_filter") or {}
+    if row_filter.get("dropped_rows"):
+        branch["Rows analysed"] = (
+            f"{_fmt(row_filter.get('kept_rows') or 0)} of "
+            f"{_fmt(row_filter.get('source_rows') or 0)} source rows"
+        )
+        branch["Rows excluded"] = (
+            f"{_fmt(row_filter['dropped_rows'])} structural row(s) — "
+            "no product identity and no money value; excluded from money metrics"
+        )
+    if model.get("multi_sheet"):
+        branch["Sheets"] = [
+            f"{r.get('sheet')} — {_fmt(r.get('rows') or 0)} rows"
+            + (f" ({r.get('top_category')})" if r.get("top_category") else "")
+            for r in (model.get("rows") or [])
+        ]
+    if domain:
+        branch["Business metrics"] = domain
+    if insights:
+        branch["Insights"] = insights
+    if columns:
+        branch["Column profile"] = columns
+    if model.get("errors"):
+        branch["Read errors"] = list(model["errors"])
+    if model.get("notes"):
+        branch["Structural notes"] = list(model["notes"])
+    return branch
+
+
+def build_client_projection(
+    report: Any, summary: Any = None, analysis_id: Any = None
+) -> dict:
+    """Project a persisted analysis into SiroQ-Client's ``ReportResultData``.
+
+    The client renders a recursive label→value tree
+    (``ReportResultData = { [key: string]: ReportNode }``), so this returns
+    decision-grade metrics as flat, pre-formatted strings at the top level and
+    keeps drill-down detail in nested branches that the same renderer recurses
+    into.
+
+    Derived from :func:`build_file_model` / :func:`_interpret_domain` so the
+    client JSON, the printable report and the dashboard can never disagree about
+    what the evidence says.
+
+    ``analysis_id`` is passed in rather than read from ``report`` because the
+    persisted report document does not carry its own analysis id -- the consumer
+    needs it to cite the exact run behind a decision.
+    """
+    report = report or {}
+    summary = summary or {}
+
+    models = [build_file_model(f) for f in (report.get("files") or []) if isinstance(f, dict)]
+
+    rows_total = 0
+    for m in models:
+        rows_total += int(m.get("row_count") or 0)
+
+    quality_scores = [
+        float(m["quality_score"]) for m in models if _num(m.get("quality_score"))
+    ]
+    mean_quality = sum(quality_scores) / len(quality_scores) if quality_scores else None
+    if mean_quality is None:
+        mean_quality = summary.get("data_quality_score")
+
+    total_findings = sum(
+        len(m.get("findings") or []) for m in models
+    ) or summary.get("findings_count") or 0
+
+    total_failed = sum(
+        1 for m in models for c in (m.get("checks") or []) if c.get("status") == "fail"
+    )
+    total_duplicates = sum(
+        int(m.get("duplicate_count") or 0) for m in models if _num(m.get("duplicate_count"))
+    )
+
+    categories = summary.get("categories_detected") or {}
+    cat_lines: list[str] = []
+    for cat, names in categories.items():
+        cat_lines.append(f"{cat} — {len(names)} file(s)")
+    for m in models:
+        if m.get("top_category") and not categories:
+            cat_lines.append(f"{m['top_category']} — {m.get('filename')}")
+
+    labels = _file_labels(models)
+    failed_files_labels = [
+        label
+        for m, label in zip(models, labels)
+        if any(c.get("status") == "fail" for c in (m.get("checks") or []))
+    ]
+
+    projection: dict[str, Any] = {
+        "Schema version": CLIENT_SCHEMA_VERSION,
+        "Application": rfmt(report.get("application_name")),
+        "Analysis ID": rfmt(analysis_id or report.get("analysis_id")),
+        "Application ID": rfmt(report.get("application_id")),
+        "Analyzed at": rfmt(report.get("analyzed_at")),
+        "Engine version": rfmt(report.get("engine_version")),
+        "Files analyzed": rfmt(
+            len(models) if models else (summary.get("file_count") or 0)
+        ),
+        "Records examined": _fmt(rows_total or summary.get("total_rows") or 0),
+        "Data quality score": f"{mean_quality:.1f}%" if _num(mean_quality) else "Not scored",
+        "Quality verdict": _quality_verdict(mean_quality, total_failed),
+        "Findings requiring review": _fmt(total_findings),
+        "Files failing a quality check": ", ".join(str(f) for f in failed_files_labels) or "None",
+        "Duplicate rows": _fmt(total_duplicates),
+        "Categories detected": cat_lines or ["None detected"],
+        "Highest signal": _agg_severity(models).title(),
+    }
+
+    pairs = list(
+        zip([f for f in (report.get("files") or []) if isinstance(f, dict)], models)
+    )
+
+    if models:
+        projection["Files"] = {
+            label: _file_projection(f, m)
+            for (f, m), label in zip(pairs, labels)
+            if label
+        }
+
+    not_analyzed = []
+    for (f, m), label in zip(pairs, labels):
+        skipped = ((m.get("domain") or {}).get("skipped")) or []
+        if skipped:
+            not_analyzed.append(f"{label} — {'; '.join(str(s) for s in skipped)}")
+        row_filter = m.get("row_filter") or {}
+        if row_filter.get("dropped_rows"):
+            not_analyzed.append(
+                f"{label} — {_fmt(row_filter['dropped_rows'])} of "
+                f"{_fmt(row_filter.get('source_rows') or 0)} source rows are "
+                "structural (blank spacer or repeated invoice header) and are "
+                "excluded from the money metrics above"
+            )
+        if row_filter.get("reason") and not row_filter.get("dropped_rows"):
+            not_analyzed.append(f"{label} — {row_filter['reason']}")
+    if not_analyzed:
+        projection["Evidence gaps"] = not_analyzed
+
+    return projection
 
 
 def build_report_model(report: Any, summary: Any = None) -> dict:

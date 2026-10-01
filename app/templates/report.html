@@ -4,21 +4,35 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SiroQ analysis report — {{ model.application_name }}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%232e6f6a%22%2F%3E%3Cpath%20d%3D%22M9%2022V10h3.1v9.2H18V22H9z%22%20fill%3D%22%23e6f0ee%22%2F%3E%3Ccircle%20cx%3D%2221%22%20cy%3D%2212%22%20r%3D%223%22%20fill%3D%22%23c97a3d%22%2F%3E%3C%2Fsvg%3E">
 <style>
-  :root { --ink:#1a2233; --mut:#6b7789; --line:#e2e8f0; --accent:#2563eb;
-          --ok:#16a34a; --warn:#d97706; --bad:#dc2626; --bg:#f8fafc; }
+:root {
+    color-scheme: light dark;
+    --paper:#f4f6f5; --sheet:#ffffff; --ink:#16302e; --mut:#5c716e; --line:#d9e3e1;
+    --accent:#2e6f6a; --accent-strong:#245b57; --accent-warm:#c97a3d; --accent-soft:#e6f0ee;
+    --ok:#2f7d4f; --warn:#b06a1f; --bad:#b3261e; --bg:#f7f9f8; --strip:#fbfcfc;
+    --shadow:0 1px 3px rgba(22,48,46,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:#0d1211; --sheet:#141b1a; --ink:#e6eeec; --mut:#93a5a2; --line:#243130;
+      --accent:#63ada5; --accent-strong:#7cc0b8; --accent-warm:#d9975e; --accent-soft:#16211f;
+      --ok:#5fbf85; --warn:#e0a765; --bad:#e8756c; --bg:#111817; --strip:#182120;
+      --shadow:0 1px 3px rgba(0,0,0,.4);
+    }
+  }
   * { box-sizing: border-box; }
   body { margin:0; font:14px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-         color:var(--ink); background:#eef1f5; }
-  .sheet { max-width:1080px; margin:24px auto; background:#fff; border:1px solid var(--line);
-           border-radius:10px; padding:34px 42px; box-shadow:0 1px 3px rgba(20,30,60,.08); }
+         color:var(--ink); background:var(--paper); }
+  .sheet { max-width:1080px; margin:24px auto; background:var(--sheet); border:1px solid var(--line);
+           border-radius:10px; padding:34px 42px; box-shadow:var(--shadow); }
   header.report { border-bottom:3px solid var(--accent); padding-bottom:16px; margin-bottom:22px; }
   header.report h1 { margin:0 0 4px; font-size:26px; }
   header.report .meta { color:var(--mut); font-size:13px; }
-  .nav { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px; }
-  .nav a, .nav button { font:inherit; border:1px solid var(--line); background:#fff; color:var(--accent);
+  .nav { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px; align-items:center; }
+  .nav a, .nav button { font:inherit; border:1px solid var(--line); background:var(--sheet); color:var(--accent);
           text-decoration:none; padding:6px 12px; border-radius:8px; cursor:pointer; }
-  .nav a:hover, .nav button:hover { background:#eff6ff; }
+  .nav a:hover, .nav button:hover { background:var(--accent-soft); border-color:var(--accent); }
   h2.section { font-size:16px; margin:30px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--line);
                color:var(--accent); }
   .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
@@ -31,28 +45,35 @@
   .sev-bad { color:var(--bad); } .sev-info { color:var(--ink); }
   .sev-muted { color:var(--mut); }
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
-  .card { border:1px solid var(--line); border-radius:10px; padding:14px 16px; background:#fff; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:14px 16px; background:var(--sheet); }
   .card h3 { margin:0 0 8px; font-size:14px; }
   .card h3 .tag { float:right; font-size:11px; font-weight:600; }
-  .tag { display:inline-block; border-radius:999px; padding:2px 8px; font-size:11px; }
-  .tag.sales { background:#dbeafe; color:#1d4ed8; }
-  .tag.inventory { background:#dcfce7; color:#15803d; }
-  .tag.products { background:#ede9fe; color:#6d28d9; }
-  .tag.purchase_orders { background:#fef3c7; color:#b45309; }
-  .tag.patients, .tag.prescriptions, .tag.payers, .tag.suppliers { background:#fce7f3; color:#be185d; }
+  .tag { display:inline-block; border-radius:999px; padding:2px 8px; font-size:11px;
+         background:var(--accent-soft); color:var(--accent-strong); }
   ul.notes { margin:8px 0; padding-left:18px; color:var(--mut); }
-  .bar-row { display:grid; grid-template-columns:190px 1fr 70px; gap:10px; align-items:center;
+  .bar-row { display:grid; grid-template-columns:190px 1fr 70px; align-items:center;
              margin:5px 0; font-size:13px; }
   .bar-track { background:var(--bg); border:1px solid var(--line); border-radius:999px; height:16px; overflow:hidden; }
-  .bar-fill { display:block; height:100%; border-radius:999px; background:linear-gradient(90deg,#3b82f6,#2563eb); }
+  .bar-fill { display:block; height:100%; border-radius:999px;
+              background:linear-gradient(90deg,var(--accent),var(--accent-strong)); }
   .bar-val { text-align:right; font-variant-numeric:tabular-nums; color:var(--mut); }
   table { border-collapse:collapse; width:100%; margin:10px 0; font-size:13px; }
   th, td { text-align:left; padding:6px 8px; border:1px solid var(--line); vertical-align:top; }
   th { background:var(--bg); font-weight:600; white-space:nowrap; }
-  tr:nth-child(even) td { background:#fbfcfe; }
+  tr:nth-child(even) td { background:var(--strip); }
+  /* Column-profile and evidence tables are genuinely wide. On a phone they must
+     scroll inside their own box rather than widening the whole page, or the
+     report is unreadable side-to-side. Scoped to `screen` so print keeps the
+     real table layout (and can still paginate it). */
+  @media screen and (max-width: 720px) {
+    .sheet { padding:20px 16px; margin:0; border-radius:0; }
+    table { display:block; max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    .bar-row { grid-template-columns:120px 1fr 62px; gap:8px; font-size:12.5px; }
+  }
   .pill { display:inline-block; border-radius:999px; padding:1px 8px; font-size:11px; font-weight:600; }
-  .pill.ok { background:#dcfce7; color:#15803d; } .pill.pass { background:#dcfce7; color:#15803d; }
-  .pill.warn { background:#fef3c7; color:#b45309; } .pill.fail { background:#fee2e2; color:#b91c1c; }
+  .pill.ok, .pill.pass { background:var(--accent-soft); color:var(--ok); }
+  .pill.warn { background:var(--accent-soft); color:var(--warn); }
+  .pill.fail { background:var(--accent-soft); color:var(--bad); }
   .muted { color:var(--mut); }
   td.evidence { font-size:12px; }
   td.evidence dl { margin:0; display:grid; grid-template-columns:auto 1fr; gap:1px 8px; }
@@ -63,6 +84,9 @@
   .file-head h3 { margin:0; font-size:15px; }
   .findings li { margin:3px 0; }
   @media print {
+    :root { color-scheme:light; --paper:#fff; --sheet:#fff; --ink:#16302e; --mut:#5c716e;
+            --line:#d9e3e1; --accent:#245b57; --accent-strong:#1d4744; --accent-soft:#eef4f3;
+            --ok:#2f7d4f; --warn:#b06a1f; --bad:#b3261e; --bg:#f7f9f8; --strip:#fbfcfc; }
     body { background:#fff; }
     .sheet { box-shadow:none; border:none; margin:0; max-width:none; padding:0; }
     .nav { display:none; }
@@ -86,8 +110,61 @@
 
   <div class="nav">
     <button onclick="window.print()">Print / save as PDF</button>
-    <span class="muted" style="align-self:center">JSON export is available from the dashboard.</span>
+    <button data-dl="{{ client_url }}" data-fallback="siroq-client-{{ analysis.id | string | truncate(8, true, '') }}.json">Download JSON (SiroQ client)</button>
+    <button data-dl="{{ raw_url }}" data-fallback="siroq-report-{{ analysis.id | string | truncate(8, true, '') }}.json">Download JSON (full report)</button>
+    <span class="muted" style="align-self:center" id="dlNote">Both exports are the same files the dashboard serves.</span>
   </div>
+
+  <script>
+    // These exports are API routes guarded by X-API-Key, and a plain <a href>
+    // navigation cannot carry that header (it would 401). Fetch with the key the
+    // dashboard already stored for this origin, then save via a blob -- the same
+    // path the dashboard button uses, so both surfaces produce identical files.
+    (function () {
+      var note = document.getElementById("dlNote");
+      function fail(msg) {
+        note.textContent = msg;
+        note.style.color = "var(--bad)";
+      }
+      Array.prototype.forEach.call(
+        document.querySelectorAll("button[data-dl]"),
+        function (btn) {
+          btn.addEventListener("click", function () {
+            var key = (localStorage.getItem("siroq_api_key") || "").trim();
+            if (!key) {
+              fail("Downloads need a stored API key — open this report from the dashboard.");
+              return;
+            }
+            note.textContent = "Preparing download…";
+            note.style.color = "";
+            fetch(btn.getAttribute("data-dl"), { headers: { "X-API-Key": key } })
+              .then(function (res) {
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                var disp = res.headers.get("Content-Disposition") || "";
+                var m = /filename="?([^";]+)"?/i.exec(disp);
+                return res.blob().then(function (blob) { return { blob: blob, m: m }; });
+              })
+              .then(function (r) {
+                var url = URL.createObjectURL(r.blob);
+                var a = document.createElement("a");
+                a.href = url;
+                a.download = (r.m && r.m[1]) || btn.getAttribute("data-fallback");
+                a.click();
+                URL.revokeObjectURL(url);
+                note.textContent = "Both exports are the same files the dashboard serves.";
+              })
+              .catch(function (e) {
+                fail(
+                  String(e.message).indexOf("401") >= 0
+                    ? "API key rejected — reopen from the dashboard and re-enter it."
+                    : "Download failed: " + e.message
+                );
+              });
+          });
+        }
+      );
+    })();
+  </script>
 
   {% if model.summary %}
   <h2 class="section">Summary</h2>

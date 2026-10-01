@@ -140,10 +140,19 @@ GET /applications/{id}/analyses/{analysis_id}                        → full sa
 GET /applications/{id}/analyses/{analysis_id}/report?format=html|json
 ```
 
-`format=json` streams the persisted report document (`Content-Disposition:
-attachment` with a `siroq-report-<app>-<id8>.json` filename) — the standard way
-for other services to consume results. `format=html` renders a self-contained,
-printable report page.
+Three formats, all served from this one route:
+
+| `format` | Serves | Filename | Use for |
+|---|---|---|---|
+| `html` (default) | self-contained printable report page | — | printing, PDF, human review |
+| `json` | the persisted report document (§4), verbatim | `siroq-report-<app>-<id8>.json` | archival, re-processing, full-fidelity consumers |
+| `client` | the SiroQ-Client projection (§4.1) | `siroq-client-<app>-<id8>.json` | SiroQ-Client and any decision-summary consumer |
+
+`json` and `client` are both `Content-Disposition: attachment` downloads — the
+filename is assigned by the server, so consumers should honour the header rather
+than construct a name. `html` links to both downloads, and the dashboard's
+"Download JSON" button streams `format=client` from this same endpoint, so a file
+saved from any of the three surfaces is byte-identical.
 
 ## 4. Report document schema
 
@@ -224,6 +233,95 @@ row_count, columns, profile, data_quality, …}]`, `domain_analytics.skipped` =
 `sheet_categories` lists per-sheet top categories. Numbers are JSON-safe
 (`NaN`/`±inf` → `null`).
 
+### 4.1 SiroQ-Client projection (`format=client`)
+
+The document above is faithful but deeply nested — `files[].profile.column_profiles[]`
+and `files[].data_quality.checks[]` are for machines. SiroQ-Client renders a
+different shape, `ReportResultData = { [key: string]: ReportNode }` where
+`ReportNode` is a primitive, an array of primitives, or another object. Feeding it
+the raw document produces an unreadable tree, so `format=client` projects the same
+evidence into that contract.
+
+**Decision metrics first.** Every value is pre-formatted to a string, so the client
+never has to guess number formatting or units:
+
+```json
+{
+  "Schema version": "siroq.client.v1",
+  "Application": "Northside pharmacy",
+  "Files analyzed": "4",
+  "Records examined": "9,828",
+  "Data quality score": "87.5%",
+  "Quality verdict": "Review before accepting",
+  "Findings requiring review": "7",
+  "Files failing a quality check": "aug-export.xlsx, rx-ledger.csv",
+  "Duplicate rows": "12",
+  "Categories detected": ["sales — 2 file(s)", "purchase_orders — 1 file(s)"],
+  "Highest signal": "Critical",
+  "Files": { "…per-file drill-down…": {} },
+  "Evidence gaps": ["workbook.xlsx — multi-sheet workbook; analyze each sheet separately"]
+}
+```
+
+`Quality verdict` is one of `Strong` (≥90), `Acceptable` (≥75), `Review before
+accepting` (≥60), `Action required` (<60 or any failed check), or `Not scored`.
+
+`Highest signal` is the highest severity the insight engine assigned to any
+computed insight across all files — `Critical`, `Warning`, or `Info`. It is
+`Info` when every file either produced no computable insights or all of them
+were informational; skipped insights do not raise it on their own, because a
+missing calculation is not the same as a flagged one.
+
+Two files may share an original filename, so `Files` keys are not guaranteed to
+be unique in the way the raw document is: the first occurrence keeps the plain
+name and later ones are numbered (`stock.csv`, `stock.csv (2)`). Read `Files` as
+an ordered object rather than assuming one key per upload.
+
+Under `Files`, each filename maps to a branch with `Rows`, `Columns`,
+`Detected category`, `Category confidence`, and then the detail a reviewer
+actually opens: `Quality` (score, verdict, which checks failed or warned, and
+the verbatim finding text), `Business metrics`, `Insights`, and `Column profile`.
+Sections are omitted when the engine produced nothing for them, and anything the
+engine could not analyze is stated explicitly rather than dropped. `Findings` is
+always a count and always matches the length of `Finding detail`, and the
+per-file counts sum to `Findings requiring review`:
+
+```json
+"Files": {
+  "aug-export.xlsx": {
+    "Rows": "1,750",
+    "Detected category": "sales",
+    "Quality": {
+      "Score": "85.0",
+      "Verdict": "Review before accepting",
+      "Failed checks": "empty_or_null, duplicate_rows",
+      "Findings": "3",
+      "Finding detail": ["empty_or_null=fail high null: script 83%", "…"]
+    },
+    "Business metrics": { "Revenue": "123,456.78", "Transactions": "1,750",
+                          "Margin basis": "unit economics",
+                          "Top products by amount": ["Amoxil 500 — 3,210.50"] },
+    "Insights": { "Profitability": { "Gross margin": "18.0%" } },
+    "Read errors": ["…"],
+    "Structural notes": ["…"]
+  }
+}
+```
+
+Two guarantees worth relying on: the projection is **derived from the same
+`build_file_model()` / `_interpret_domain()` code** as the printable HTML and the
+dashboard, so the three cannot disagree about what the evidence says; and nothing
+is ever silently omitted — a file that failed to read still appears under `Files`
+with a populated `Read errors`.
+
+Read `Business metrics` with the units in mind: gross margin is reported as a
+currency total alongside its percentage, and `Margin basis` says whether that
+total came from per-row margin columns or from unit economics. Without it the two
+figures look contradictory.
+
+`Schema version` is `siroq.client.v1`. Consumers should check it and treat an
+unknown value as a shape change rather than guessing.
+
 ### Domain categories and canonical fields
 
 `top_category` and `domain_analytics.category` are one of:
@@ -251,8 +349,9 @@ unlikely (applications are created idempotently by name).
 
 1. **Ingest** — `POST /analyze` once per batch (files + `application_name`). The
    response carries `analysis_id` + `summary` synchronously.
-2. **Consume results** — either use the inline `report`, or later
-   `GET /applications/{id}/analyses/{analysis_id}/report?format=json`.
+2. **Consume results** — use the inline `report`, or fetch it later. SiroQ-Client
+   should fetch `…/report?format=client` (§4.1) and store the result as
+   `Report.resultData`; use `format=json` when you need the full document.
 3. **Refresh** — re-run `POST /applications/{id}/analyze` after new uploads, or
    upload more files via `POST /applications/{id}/files` (which re-analyzes).
 4. **Interact with a single file** (optional) — `preview` for UI inspection,
@@ -282,5 +381,10 @@ curl -s -H "$KEY" "$BASE/applications/$(jq -r .application_id analysis.json)/ana
   `files.stored_path`; hashes are `sha256` so consumers can dedupe.
 - The service is stateless between requests except for Postgres + storage; the
   human dashboard lives at `/dashboard/` and is not part of the machine API.
+- Excel is read with `python-calamine` first because Crystal Reports exports carry
+  stylesheets openpyxl rejects; `openpyxl` is the automatic fallback. Both are
+  declared dependencies, and a workbook neither can read is reported through
+  `file.errors` (and surfaces in the client projection's `Read errors`) rather
+  than analysing to an empty result.
 - OpenAPI is served at `/openapi.json`; import it into API clients / codegen
   against any of the documented routes.

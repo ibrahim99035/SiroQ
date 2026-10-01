@@ -76,24 +76,18 @@ def _dashboard_build() -> str:
 
 
 if DASHBOARD_DIR.is_dir():
-    @app.api_route("/dashboard/build.json", methods=["GET", "HEAD"], include_in_schema=False)
-    def dashboard_build() -> Response:
-        return Response(
-            content=json.dumps({"build": _dashboard_build()}),
-            media_type="application/json",
-            headers={"Cache-Control": "no-store"},
-        )
-
     @app.api_route("/dashboard/", methods=["GET", "HEAD"], include_in_schema=False)
     def dashboard_index() -> Response:
-        """Serve index.html with the current build id injected.
+        """Serve index.html.
 
-        The page compares that id against /dashboard/build.json, so a tab left
-        open on an older build is told to reload instead of silently running it.
+        Cache headers on every dashboard asset are ``no-store`` (see
+        :class:`_NoStoreStaticFiles`), so a reload always picks up the current
+        build. There is deliberately no build-id meta tag and no build.json
+        endpoint: the freshness check they powered kept showing a "newer build
+        available" banner at the top of the dashboard after any edit, including
+        edits to files the dashboard does not even use.
         """
         html = (DASHBOARD_DIR / "index.html").read_text(encoding="utf-8")
-        tag = f'<meta name="siroq-build" content="{_dashboard_build()}">'
-        html = html.replace("<head>", f"<head>\n    {tag}", 1)
         return Response(
             content=html,
             media_type="text/html; charset=utf-8",

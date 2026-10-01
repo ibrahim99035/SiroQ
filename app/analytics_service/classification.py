@@ -38,7 +38,10 @@ CANONICAL_FIELD_SYNONYMS = {
                    "price", "selling_price"],
     "total_amount": ["total amount", "total sales", "grand total",
                      "الإجمالي", "المبلغ", "total_amount", "total",
-                     "total_revenue", "revenue", "net_revenue"],
+                     "total_revenue", "revenue", "net_revenue",
+                     "إجمالي البيع", "اجمالي البيع", "إجمالى البيع",
+                     "إجمالى المبيعات", "إجمالي المبيعات", "إجمالي قيمة البيع",
+                     "إجمالى قيمة المبيعات", "مبيعات"],
     "payment_method": ["payment", "pay method", "mode of payment",
                        "طريقة الدفع", "payment_method", "payment type"],
     "prescriber": ["prescriber", "doctor", "physician", "prescribing",
@@ -69,6 +72,30 @@ CANONICAL_FIELD_SYNONYMS = {
 
 CONF_CONFIRMED = 90
 CONF_UNCERTAIN = 70
+
+# Headers naming a rate, ratio or share. Summing or averaging one of these as
+# currency is meaningless, and because they are numeric they otherwise sail
+# through content inference and get used for revenue: a "profit percentage"
+# column was picked as total_amount and turned a healthy file into a reported
+# -977% gross margin. These columns may still back their own field, but never a
+# monetary one.
+RATIO_HEADER_RE = re.compile(
+    r"(?:^|[^a-z])(pct|percent|percentage|ratio|rate|margin_pct|"
+    r"نسبة|نسبه|نسبتة|النسبة|معدل|٪|%)(?:$|[^a-z])"
+)
+
+# Fields whose value is currency or a count, and so may never be filled from a
+# column whose header says it is a rate.
+MONEY_FIELDS = {
+    "total_amount", "unit_price", "unit_cost", "total_cost", "net_profit",
+    "stock_on_hand", "quantity",
+}
+
+
+def _is_ratio_header(name: str) -> bool:
+    """True when a header names a percentage/rate rather than an amount."""
+    text = str(name).strip().lower().replace(" ", "_")
+    return bool(RATIO_HEADER_RE.search(text))
 
 # Fields that are matched by header name ONLY. A bare number is not evidence that
 # a column is a price, a cost, a profit or a stock level -- an unlabelled numeric
@@ -178,19 +205,29 @@ def classify_dataframe(df: pd.DataFrame) -> dict:
     values = {h: df[h].tolist() for h in df.columns}
 
     # --- Phase A: header (name) matching --------------------------------
+    # A monetary field only accepts a header match as strong as it demands from
+    # content. Fuzzy scoring rates `vat_amount` at 73 against the synonym
+    # `total_amount`, which is a good deal better than nothing but nowhere near
+    # good enough to become someone's revenue: it turned a purchase workbook
+    # into a -44,376,901% gross margin. Below CONF_CONFIRMED the match is
+    # discarded and the field stays unresolved, so the dependent insight reports
+    # the column it needs instead of a number built on a coincidence.
     header_scores = {}
     header_pick = {}
     for field, syns in CANONICAL_FIELD_SYNONYMS.items():
+        floor = CONF_CONFIRMED if field in MONEY_FIELDS else CONF_UNCERTAIN
         best_score = 0.0
         best_header = None
         for token in syns:
             for h in headers:
+                if field in MONEY_FIELDS and _is_ratio_header(h):
+                    continue
                 s = fuzz.token_sort_ratio(h.lower(), token.lower())
                 if s > best_score:
                     best_score = s
                     best_header = h
         header_scores[field] = round(best_score, 1)
-        header_pick[field] = best_header if best_score >= CONF_UNCERTAIN else None
+        header_pick[field] = best_header if best_score >= floor else None
 
     # Resolve collisions: keep the strongest field per source column and free
     # the losers so the content pass can try to place them elsewhere.
@@ -222,6 +259,8 @@ def classify_dataframe(df: pd.DataFrame) -> dict:
         for h in headers:
             if h in used_columns:
                 continue
+            if field in MONEY_FIELDS and _is_ratio_header(h):
+                continue
             kinds, c = detect_content(values.get(h, []))
             if not (kinds & allowed):
                 continue
@@ -229,10 +268,18 @@ def classify_dataframe(df: pd.DataFrame) -> dict:
                 best_c, best_h = c, h
         content_scores[field] = round(best_c, 1)
         if best_h is not None and best_c >= CONF_UNCERTAIN:
-            # only surface a content-based suggestion that clears the review
-            # threshold; a weak guess is reported as "unconfirmed" with no pick
-            suggested[field] = best_h
-            used_columns.add(best_h)
+            # A monetary field drives every headline figure, so a content-only
+            # guess has to be strong, not merely plausible. At the ordinary
+            # threshold a bare number was offered as revenue: a purchase
+            # workbook's `vat_amount` column (which totalled 1.03) became
+            # "revenue" and produced a reported -44,376,901% gross margin.
+            # Money fields therefore require CONF_CONFIRMED from content, and
+            # anything weaker is left unmapped so the rule reports the missing
+            # column instead of printing a number nobody can act on.
+            threshold = CONF_CONFIRMED if field in MONEY_FIELDS else CONF_UNCERTAIN
+            if best_c >= threshold:
+                suggested[field] = best_h
+                used_columns.add(best_h)
 
     # --- Phase C: final per-field status --------------------------------
     final = {}

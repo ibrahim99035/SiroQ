@@ -188,8 +188,11 @@ def test_multi_sheet_excel_analyzes_each_sheet(client):
     summary = r.json()["summary"]
     assert summary["categories_detected"]["sales"] == ["workbook.xlsx[Sales]"]
     assert summary["categories_detected"]["prescriptions"] == ["workbook.xlsx[Prescriptions]"]
-    # ndc is a drug identifier, not a business field: it must stay unmapped
-    # instead of being inferred as total_amount, so it costs the 5-point penalty
-    # and raises one unmapped-column finding.
-    assert summary["data_quality_score"] == 97.5
-    assert summary["findings_count"] == 1
+    # ndc, days_supply and rx_number are not business fields: they must stay
+    # unmapped instead of being inferred as total_amount/quantity, so they cost
+    # the 5-point penalty and raise one unmapped-column finding per sheet.
+    # Both sheets therefore score 95.0 (was 97.5, when a bogus
+    # total_amount->days_supply mapping masked the warning on the second sheet).
+    assert summary["data_quality_score"] == 95.0
+    # one unmapped-column finding per sheet
+    assert summary["findings_count"] == 2

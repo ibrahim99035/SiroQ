@@ -25,6 +25,16 @@
   function getKey() { return (localStorage.getItem("siroq_api_key") || "").trim(); }
   function setKey(k) { localStorage.setItem("siroq_api_key", k.trim()); }
 
+  /* Recover the filename the server asked for, so a download is named by the
+     API's Content-Disposition contract instead of being guessed client-side. */
+  function filenameFromDisposition(header) {
+    if (!header) return null;
+    const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header);
+    if (star) { try { return decodeURIComponent(star[1].trim()); } catch (e) { /* fall through */ } }
+    const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(header);
+    return plain ? plain[1].trim() : null;
+  }
+
   async function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ "X-API-Key": getKey() }, opts.headers || {});
@@ -1062,19 +1072,31 @@
           w.document.body.innerHTML = "Could not load report: " + esc(e.message);
         });
     });
+    /* Downloads stream from the server endpoint rather than being rebuilt in the
+       browser: the file a reviewer saves is byte-identical to what the printable
+       report and the API hand out, so the three can never disagree. The API key
+       cannot ride along on a plain <a download>, so fetch -> blob keeps auth. */
     $("dlJsonBtn").addEventListener("click", async function () {
       const appId = state.appId, aid = state.analysisId;
       if (!appId || !aid) return;
       try {
-        const a = await api("/api/v1/applications/" + appId + "/analyses/" + aid);
-        const blob = new Blob([JSON.stringify(a, null, 2)], { type: "application/json" });
+        const res = await fetch(
+          "/api/v1/applications/" + appId + "/analyses/" + aid + "/report?format=client",
+          { headers: { "X-API-Key": getKey() } }
+        );
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const el = document.createElement("a");
         el.href = url;
-        el.download = "siroq-analysis-" + aid.slice(0, 8) + ".json";
+        el.download = filenameFromDisposition(res.headers.get("Content-Disposition"))
+          || "siroq-client-" + aid.slice(0, 8) + ".json";
         el.click();
         URL.revokeObjectURL(url);
-      } catch (e) { alert("Could not download JSON: " + e.message); }
+      } catch (e) {
+        if (String(e.message).includes("401")) { openKeyModal(); return; }
+        alert("Could not download JSON: " + e.message);
+      }
     });
   }
 
@@ -1095,36 +1117,11 @@
     }, 220);
   }
 
-  /* ---------- build freshness ---------- */
-
-  function hardReload() {
-    // location.reload() can be served from cache; ask for the network copy
-    try { location.replace(location.pathname + "?build=" + Date.now()); }
-    catch (e) { location.reload(); }
-  }
-
-  function checkBuildFreshness() {
-    const meta = document.querySelector('meta[name="siroq-build"]');
-    const loaded = meta && meta.getAttribute("content");
-    return fetch("/dashboard/build.json", { cache: "no-store" })
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (loaded && d.build && d.build !== loaded) {
-          const banner = $("staleBanner");
-          if (banner) banner.hidden = false;
-        }
-      })
-      .catch(function () { /* offline: keep the current build */ });
-  }
-
   document.addEventListener("DOMContentLoaded", function () {
     actions();
     boot();
-    checkBuildFreshness();
-    setInterval(checkBuildFreshness, 60000);
     window.addEventListener("resize", onResize);
     $("reloadBtn").addEventListener("click", boot);
-    $("staleReloadBtn").addEventListener("click", hardReload);
     $("keyBtn").addEventListener("click", function () { openKeyModal(); });
     $("keySaveBtn").addEventListener("click", saveKey);
     $("keyCancelBtn").addEventListener("click", closeKeyModal);

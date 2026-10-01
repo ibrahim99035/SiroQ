@@ -60,19 +60,38 @@ def _read_csv_source(content: bytes) -> ReaderResult:
     return ReaderResult({"default": df}, [])
 
 
+# Calamine first, openpyxl as a fallback. Calamine reads exported workbooks whose
+# style sheets are invalid per OOXML (Crystal Reports writes font family > 14),
+# which openpyxl's stylesheet parser rejects wholesale. openpyxl is a strict
+# subset, so it must never take precedence -- but without it a missing optional
+# engine would silently yield an empty analysis instead of a readable workbook.
+_EXCEL_ENGINES = ("calamine", "openpyxl")
+
+
 @file_readers.register("excel", description="Excel workbook (.xlsx/.xls).")
 def _read_excel_source(content: bytes) -> ReaderResult:
-    # Calamine reads exported workbooks whose style sheets are invalid per
-    # OOXML (Crystal Reports writes font family > 14); openpyxl's stylesheet
-    # parser rejects them wholesale, calamine ignores styles.
-    raw_sheets = pd.read_excel(io.BytesIO(content), sheet_name=None, engine="calamine")
-    sheet_frames: dict[str, pd.DataFrame] = {}
-    notes: list[str] = []
-    for sheet_name, sheet_df in raw_sheets.items():
-        extracted, sheet_notes = _extract_report_table(sheet_df)
-        sheet_frames[sheet_name] = extracted
-        notes.extend(f"{sheet_name}: {n}" for n in sheet_notes)
-    return ReaderResult(sheet_frames, notes)
+    last_error: Exception | None = None
+    for engine in _EXCEL_ENGINES:
+        try:
+            raw_sheets = pd.read_excel(
+                io.BytesIO(content), sheet_name=None, engine=engine
+            )
+        except Exception as exc:  # try the next engine before giving up
+            last_error = exc
+            continue
+
+        sheet_frames: dict[str, pd.DataFrame] = {}
+        notes: list[str] = []
+        for sheet_name, sheet_df in raw_sheets.items():
+            extracted, sheet_notes = _extract_report_table(sheet_df)
+            sheet_frames[sheet_name] = extracted
+            notes.extend(f"{sheet_name}: {n}" for n in sheet_notes)
+        return ReaderResult(sheet_frames, notes)
+
+    raise RuntimeError(
+        f"no Excel engine could read this workbook ({', '.join(_EXCEL_ENGINES)}): "
+        f"{last_error}"
+    )
 
 
 @file_readers.register("json", description="JSON object, array of objects, or JSONL.")
@@ -298,10 +317,17 @@ def _extract_report_table(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         )
 
     if mapped:
+        source_rows = int(len(df) - df.isna().all(axis=1).sum())
         notes.append(
             f"report-table discovery: header row at row {best_idx + 1}, "
             f"{len(frame.columns)} columns, {len(frame)} data rows"
         )
+        if source_rows > len(frame):
+            notes.append(
+                f"{source_rows - len(frame)} of {source_rows} populated source "
+                "row(s) were blank spacer or repeated-header rows and are not "
+                "counted as data"
+            )
     return frame, notes
 
 
@@ -314,6 +340,94 @@ def _is_missing(value) -> bool:
         return bool(pd.isna(value))
     except (TypeError, ValueError):
         return False
+
+
+# --- Transactional row selection ---------------------------------------
+# Crystal Reports exports repeat a per-invoice header block (employee, date,
+# invoice total, item count) directly above the line items it covers. Those
+# header rows survive table extraction because they populate columns, and they
+# then leak into financial aggregates: a run of them once contributed 67% of one
+# file's sales column, and their text values ("د / عبدالحميد") were coerced into
+# a profit column. A real line item always names what it is and carries a
+# numeric money value, so requiring both is what separates the two.
+IDENTITY_COLUMNS = (
+    "product_name", "product_code", "product", "item_name", "item", "sku",
+    "sku_name", "drug_name", "medicine_name", "اسم_الصنف", "كود_الصنف",
+)
+
+MONEY_COLUMNS = (
+    "cost", "total_cost", "selling_price", "total_revenue", "total_amount",
+    "revenue", "amount", "net_profit", "profit", "unit_cost", "unit_price",
+    "total_purchase", "purchase_total", "purchase_amount", "grand_total",
+    "line_total", "net_amount", "إجمالى_البيع", "إجمالي_البيع", "البيع",
+    "التكلفة", "سعر_البيع", "تكلفة",
+)
+
+# If most rows look non-transactional the frame is not a report carrying
+# structural noise, it is simply a file with no product identity (a ledger, a
+# payments export). Dropping it would destroy the analysis rather than clean it,
+# so the filter stands down and every row is kept.
+MAX_DROP_RATIO = 0.5
+
+
+def transactional_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Split ``df`` into rows that represent real transactions and the rest.
+
+    Returns ``(kept, stats)``; ``kept`` is ``df`` itself when the filter cannot
+    be applied or would discard too much, so callers can always use the result
+    unconditionally. ``stats`` records what happened for the report to surface,
+    which is what keeps a filtered row count from silently understating the
+    file.
+    """
+    source = int(len(df))
+    stats: dict[str, Any] = {
+        "source_rows": source,
+        "kept_rows": source,
+        "dropped_rows": 0,
+        "applied": False,
+        "reason": "",
+    }
+    if source == 0:
+        return df, stats
+
+    ident = [c for c in df.columns if c in IDENTITY_COLUMNS]
+    money = [c for c in df.columns if c in MONEY_COLUMNS]
+    if not ident:
+        stats["reason"] = "no product/item column to identify line items"
+        return df, stats
+    if not money:
+        stats["reason"] = "no money column to confirm a line item"
+        return df, stats
+
+    has_identity = df[ident].notna().any(axis=1)
+    has_value = pd.DataFrame(
+        {c: pd.to_numeric(df[c], errors="coerce") for c in money}
+    ).notna().any(axis=1)
+    keep = (has_identity & has_value).fillna(False)
+
+    dropped = int((~keep).sum())
+    if dropped == 0:
+        stats["reason"] = "every row carried an identity and a money value"
+        return df, stats
+    if dropped > MAX_DROP_RATIO * source:
+        stats["reason"] = (
+            f"{dropped} of {source} rows lack an identity or money value, "
+            "which reads as a file without product identity rather than "
+            "structural noise; kept every row"
+        )
+        stats["dropped_rows"] = 0
+        return df, stats
+
+    stats.update(
+        applied=True,
+        kept_rows=int(keep.sum()),
+        dropped_rows=dropped,
+        reason=(
+            f"{dropped} structural row(s) carry no product identity and no "
+            "money value; excluded from financial aggregates"
+        ),
+    )
+    return df[keep].reset_index(drop=True), stats
 
 
 _TOKEN_RE = re.compile(r"[^0-9a-z]+")

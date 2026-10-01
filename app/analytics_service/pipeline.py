@@ -40,14 +40,28 @@ def _stage_quality(df, ctx):
     ctx["quality_findings"] = quality.findings_detail(qc)
 
 
+@file_analyzer("rows", order=35)
+def _stage_rows(df, ctx):
+    """Drop structural report rows before anything aggregates money.
+
+    Quality and profiling deliberately still see every row -- a blank spacer or
+    a repeated invoice header is a fact about the file worth scoring. Only the
+    money-touching stages get the transactional view.
+    """
+    kept, stats = ingestion.transactional_rows(df)
+    ctx["transactional_rows"] = stats
+    ctx["analysis_df"] = kept
+
+
 @file_analyzer("domain", order=40)
 def _stage_domain(df, ctx):
-    cats = ingestion.detect_schema_category(df)
+    frame = ctx.get("analysis_df", df)
+    cats = ingestion.detect_schema_category(frame)
     top_category = max(cats, key=cats.get) if cats and max(cats.values()) > 0 else None
     ctx["categories"] = {k: round(v, 3) for k, v in cats.items()}
     ctx["top_category"] = top_category
     ctx["domain_analytics"] = (
-        analytics.run_domain_analytics(df, top_category, ctx["fmap"])
+        analytics.run_domain_analytics(frame, top_category, ctx["fmap"])
         if top_category
         else {"skipped": "no category detected"}
     )
@@ -62,7 +76,7 @@ def _stage_insights(df, ctx):
     non-trend insight.
     """
     ctx["insights"] = insights.compute_insights(
-        df, ctx.get("fmap"), ctx.get("top_category")
+        ctx.get("analysis_df", df), ctx.get("fmap"), ctx.get("top_category")
     )
 
 
@@ -115,6 +129,7 @@ def _analyze_dataframe(df, *, sheet=None) -> dict[str, Any]:
     sub["top_category"] = ctx["top_category"]
     sub["domain_analytics"] = ctx["domain_analytics"]
     sub["insights"] = ctx.get("insights", [])
+    sub["row_filter"] = ctx.get("transactional_rows")
     return sub
 
 
@@ -203,6 +218,22 @@ def _multi_sheet_section(section: dict[str, Any], ingested) -> dict[str, Any]:
         "skipped": "multi-sheet workbook; analyze each sheet separately"
     }
     section["insights"] = []
+    filters = [ss.get("row_filter") for ss in sheets if ss.get("row_filter")]
+    dropped = sum(f.get("dropped_rows", 0) for f in filters)
+    if filters:
+        section["row_filter"] = {
+            "source_rows": section["row_count"] + dropped,
+            "kept_rows": section["row_count"],
+            "dropped_rows": dropped,
+            "applied": dropped > 0,
+            "reason": (
+                f"{dropped} structural row(s) across {len(filters)} sheet(s) "
+                "carry no product identity and no money value; excluded from "
+                "financial aggregates"
+                if dropped
+                else "every row carried an identity and a money value"
+            ),
+        }
     return section
 
 

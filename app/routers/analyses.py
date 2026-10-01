@@ -2,8 +2,10 @@
 raw file download.
 """
 import json
+import re
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
@@ -12,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.analytics_service import forecast as forecast_engine
 from app.analytics_service.preview import build_series, infer_columns, pick_date_column, pick_value_column, preview
-from app.analytics_service.reporting import build_report_model
+from app.analytics_service.reporting import build_client_projection, build_report_model
 from app.analytics_service.storage import read_bytes
 from app.database import get_db
 from app.models.service_models import Analysis, Application, StoredFile
@@ -36,8 +38,35 @@ def _parse_uuid(value: str) -> bool:
 
 
 def _ascii_filename(value: str, fallback: str = "app") -> str:
+    """Reduce an application name to a safe ASCII filename stem.
+
+    Application names are free text and end up inside a quoted
+    ``Content-Disposition`` filename. A name containing ``"`` or a newline would
+    corrupt that header (and a name with only non-ASCII characters, such as the
+    Arabic samples, must still yield a usable stem rather than nothing).
+    """
     slug = value.encode("ascii", "ignore").decode()
-    return slug.strip().replace(" ", "-") or fallback
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", slug).strip("-._")
+    # a stem of only dots would resolve to the parent directory
+    return slug or fallback
+
+
+def _json_download(payload: Any, stem: str, analysis_id: Any) -> Response:
+    """Serialize ``payload`` as a downloadable JSON attachment.
+
+    Both the raw report (``format=json``) and the SiroQ-Client projection
+    (``format=client``) go through here so the filename contract and encoding
+    are identical for every JSON consumer.
+    """
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{stem}-{str(analysis_id)[:8]}.json"'
+            )
+        },
+    )
 
 
 @router.get("/applications/{application_id}/analyses/{analysis_id}",
@@ -66,7 +95,7 @@ def get_analysis(application_id: str, analysis_id: str, db: Session = Depends(ge
 def get_analysis_report(
     application_id: str,
     analysis_id: str,
-    format: str = Query("html", pattern="^(html|json)$"),
+    format: str = Query("html", pattern="^(html|json|client)$"),
     request: Request = None,
     db: Session = Depends(get_db),
 ):
@@ -75,7 +104,9 @@ def get_analysis_report(
     ``format=html`` renders a self-contained, printable HTML report (columns,
     quality checks, category probabilities and domain metrics as layout-safe
     CSS bars and tables). ``format=json`` streams the persisted report document
-    for machine consumption.
+    for machine consumption. ``format=client`` streams the decision-grade
+    projection SiroQ-Client renders (``ReportResultData``): flat pre-formatted
+    metrics at the top level with per-file drill-down branches.
     """
     if not _parse_uuid(application_id) or db.get(Application, application_id) is None:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -87,15 +118,18 @@ def get_analysis_report(
 
     application = db.get(Application, application_id)
     if format == "json":
-        return Response(
-            content=json.dumps(analysis.report, ensure_ascii=False, indent=2),
-            media_type="application/json",
-            headers={
-                "Content-Disposition": (
-                    f'attachment; filename="siroq-report-{_ascii_filename(application.name)}-'
-                    f'{str(analysis.id)[:8]}.json"'
-                )
-            },
+        return _json_download(
+            analysis.report,
+            f"siroq-report-{_ascii_filename(application.name)}",
+            analysis.id,
+        )
+    if format == "client":
+        return _json_download(
+            build_client_projection(
+                analysis.report, analysis.summary, analysis_id=analysis.id
+            ),
+            f"siroq-client-{_ascii_filename(application.name)}",
+            analysis.id,
         )
     body = TEMPLATES.TemplateResponse(
         request,
@@ -124,6 +158,14 @@ def get_analysis_report(
             },
             "model": build_report_model(analysis.report, analysis.summary),
             "report": analysis.report,
+            "client_url": (
+                f"/api/v1/applications/{application_id}/analyses/{analysis_id}"
+                "/report?format=client"
+            ),
+            "raw_url": (
+                f"/api/v1/applications/{application_id}/analyses/{analysis_id}"
+                "/report?format=json"
+            ),
         },
     ).body.decode("utf-8")
     return HTMLResponse(content=body)

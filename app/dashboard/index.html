@@ -4,14 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SiroQ Analysis Dashboard</title>
+<!-- Inline mark: avoids a /favicon.ico request (and its 404) on every report
+     link, since these pages are often opened in a new tab by reviewers. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%232e6f6a%22%2F%3E%3Cpath%20d%3D%22M9%2022V10h3.1v9.2H18V22H9z%22%20fill%3D%22%23e6f0ee%22%2F%3E%3Ccircle%20cx%3D%2221%22%20cy%3D%2212%22%20r%3D%223%22%20fill%3D%22%23c97a3d%22%2F%3E%3C%2Fsvg%3E">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<div id="staleBanner" class="stale-banner" hidden>
-  <strong>A newer dashboard build is available.</strong>
-  This tab is running an older version, so some panels may be missing or wrong.
-  <button id="staleReloadBtn" class="btn primary">Reload now</button>
-</div>
 <header class="topbar">
   <div class="brand">
     <span class="logo">S</span>
@@ -22,7 +20,7 @@
     <button id="addFilesBtn" class="btn" disabled>Add files</button>
     <button id="reloadBtn" class="btn">Reload</button>
     <button id="openReportBtn" class="btn primary" disabled>Open printable report</button>
-    <button id="dlJsonBtn" class="btn" disabled>Download JSON</button>
+    <button id="dlJsonBtn" class="btn" disabled title="SiroQ-Client JSON: decision metrics plus per-file detail">Download JSON</button>
     <button id="keyBtn" class="btn ghost">API key</button>
   </div>
 </header>
