@@ -11,7 +11,10 @@ class Settings(BaseSettings):
     (``siroq_app``); migrations run as the owning role (``siroq``).
     """
 
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="")
+    # ``extra="ignore"``: ``.env`` is shared with ``docker compose`` (which
+    # needs COMPOSE_PROJECT_NAME), so it legitimately carries keys that are not
+    # application settings. The default "forbid" turned that into a boot crash.
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
     DATABASE_URL: str = Field(
         default="postgresql+psycopg://siroq_app:siroq_app_dev_password@localhost:5433/siroq"

@@ -13,8 +13,9 @@ migrate:
 makemigration:
 	docker compose exec app alembic revision --autogenerate -m "$(name)"
 
+# BROKEN: scripts/seed.py is not in the repo.
 seed:
-	docker compose exec app python scripts/seed.py
+	@echo "seed is not available: scripts/seed.py does not exist in this repo." && exit 1
 
 test:
 	docker compose exec app pytest -v
