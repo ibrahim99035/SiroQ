@@ -121,18 +121,22 @@ the final fit (deliberate, history-preserving choice).
 
 ## Testing
 
-- Tests run against a **throwaway Postgres DB** (`siroq_test`) with an
-  overridden `STORAGE_PATH` — never against the live DB. See
-  `pytest.ini`/`tests/conftest.py`.
+- Tests run against a **throwaway database** (`<database>_test`, derived from
+  whichever database they are pointed at) with `STORAGE_DRIVER` pinned to `local`
+  — never against the live database. See `pytest.ini`/`tests/conftest.py`.
 - `conftest.py` truncates `analyses/files/applications` and wipes storage each
-  test, so the live demo/data-sample apps are never touched.
+  test, so the live data is never touched. `delete_tree()` refuses to run under
+  any other storage driver, so a stray `STORAGE_DRIVER=s3` cannot turn a test run
+  into deletion of bucket objects.
 
 ## Config / infra
 
-- `docker-compose.yml` provides PostGIS on port 5433 (roles `siroq`/`siroq_app`,
-  databases `siroq` live, `siroq_test` for tests).
-- `alembic/` owns migrations (`MIGRATIONS_DATABASE_URL` uses the `siroq` role);
-  the app connects as `siroq_app`.
+- The database is **Neon**, not a container. Roles `siroq_app` (app) and the
+  branch owner (migrations); `docker/init-db/01_create_app_role.sql` provisions
+  them. `docker-compose.yml` runs the API only.
+- `alembic/` owns migrations (`MIGRATIONS_DATABASE_URL` uses the branch owner's
+  direct, non-pooled endpoint); the app connects as `siroq_app` through the
+  pooled endpoint.
 - Files (`files.original_filename`, `sha256`, `size_bytes`, `stored_path`) live
   on disk under `STORAGE_PATH` (default `./data/storage`), mirrored into the
   `files` table.

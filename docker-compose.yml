@@ -1,46 +1,37 @@
-services:
-  db:
-    image: postgis/postgis:15-3.4
-    container_name: siroq_db
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: siroq
-      POSTGRES_PASSWORD: siroq_dev_password
-      POSTGRES_DB: siroq
-    ports:
-      - "5433:5432"
-    volumes:
-      - siroq_pg_data:/var/lib/postgresql/data
-      - ./docker/init-db:/docker-entrypoint-initdb.d
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U siroq -d siroq"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+# Local development for the API process only.
+#
+# There is deliberately no `db` service any more. The database is Neon, and
+# `docker compose up` must not quietly bring up a Postgres that nothing in the
+# service is pointed at. The values below are read from `.env`; see
+# `.env.example` for the Neon shape (pooler for DATABASE_URL, direct endpoint
+# for MIGRATIONS_DATABASE_URL).
+#
+# The bucket is Neon Object Storage in every environment, including this one —
+# storage contents are referenced by StoredFile rows and are not reproducible
+# from the database, so a local scratch directory would let a test or a demo
+# delete them for real. That is what `STORAGE_PATH` below is for.
 
+services:
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: siroq_app
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+psycopg://siroq_app:siroq_app_dev_password@db:5432/siroq
-      MIGRATIONS_DATABASE_URL: postgresql+psycopg://siroq:siroq_dev_password@db:5432/siroq
-      API_KEY: dev_api_key_change_in_production
+      DATABASE_URL: ${DATABASE_URL}
+      MIGRATIONS_DATABASE_URL: ${MIGRATIONS_DATABASE_URL}
+      API_KEY: ${API_KEY:?API_KEY must be set in .env}
+      # Local scratch storage, for `make test` runs outside Docker. Never a
+      # bucket: tests wipe storage between cases.
       STORAGE_PATH: /data/storage
-      ENVIRONMENT: development
-      LOG_LEVEL: INFO
+      STORAGE_DRIVER: local
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SOURCE_URL_ALLOWED_HOSTS: ${SOURCE_URL_ALLOWED_HOSTS:-}
     ports:
       - "8000:8000"
     volumes:
       - ./app:/code/app
       - ./data/storage:/data/storage
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-volumes:
-  siroq_pg_data:
-    name: siroq_siroq_pg_data

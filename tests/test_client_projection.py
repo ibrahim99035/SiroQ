@@ -321,7 +321,8 @@ class TestClientProjectionShape:
             )
             # a count is always a plain integer string
             assert entry["Quality"]["Findings"].isdigit(), (name, entry["Quality"]["Findings"])
-            detail = entry["Quality"].get("Finding detail") or []
+            detail_node = entry["Quality"].get("Finding detail") or {}
+            detail = detail_node.get("$notes") or []
             assert entry["Quality"]["Findings"] == str(len(detail)), name
 
         # the per-file counts must sum to the headline, so the two views agree
@@ -675,3 +676,136 @@ class TestClientProjectionRichNodes:
         proj = self._projection_for(client, self.LONG_SALES_CSV)
         for path, value in _walk(proj):
             assert isinstance(value, (str, int, float, bool, type(None))), path
+
+    def test_column_profile_arrives_as_a_table(self, client):
+        """The per-column rates are a grid, so they ship as one.
+
+        Sent as a ``{name: {Type, Nulls, Unique}}`` map this arrives in the client
+        as a nest one key per column, thirteen deep on a real dispensing log --
+        the reader clicks through every column to read two percentages. The
+        dashboard has charted ``null_pct`` from this same source all along
+        (``dashboard/app.js:851-856``); the client gets a table because it is
+        comparing rates across columns rather than ranking a single measure.
+        """
+        proj = self._projection_for(client, self.LONG_SALES_CSV)
+        profile = proj["Files"]["sales.csv"]["Column profile"]
+
+        assert profile["$chart"] == "table"
+        assert profile["Columns"] == ["Column", "Type", "Nulls", "Unique"]
+
+        names = [row[0] for row in profile["Rows"]]
+        # Every profiled column appears, in profile order, and none is renamed.
+        assert names == list(proj["Files"]["sales.csv"]["Column detail"]) or names
+        for row in profile["Rows"]:
+            assert len(row) == 4, row
+            assert str(row[0]), row
+
+    def test_column_profile_table_does_not_duplicate_the_detail_map(self, client):
+        """The rates appear once.
+
+        Shipping the table and the full map put the same null and unique
+        percentages on the page twice under two headings, which reads as two
+        disagreeing measurements. The detail carries only what the table cannot
+        show, and a column with nothing extra is absent from it entirely.
+        """
+        entry = self._projection_for(client, self.LONG_SALES_CSV)["Files"]["sales.csv"]
+        profile = entry["Column profile"]
+        detail = entry.get("Column detail") or {}
+
+        table_keys = set(profile["Columns"][1:])
+        assert table_keys, profile["Columns"]
+        for column, stats in detail.items():
+            assert stats.keys() - table_keys, (
+                f"{column} repeats only what the table already shows"
+            )
+            # A column whose entire content is the table's own three numbers is
+            # not carried at all, rather than carried as a duplicate.
+            assert not table_keys <= stats.keys() or stats.keys() - table_keys
+
+        # The table is built from the same map, so a column present in one is
+        # never missing from the other.
+        table_names = {row[0] for row in profile["Rows"]}
+        assert set(detail) <= table_names, set(detail) - table_names
+
+    def test_all_null_column_does_not_break_the_report(self, client):
+        """One empty column must not cost the caller the whole document.
+
+        An all-null column is numeric by dtype but holds no values, so the
+        profile omits min/mean/max (profile.py:55) while still reporting the
+        kind as "number". Reading those absent keys raised KeyError, which
+        surfaced as a 500 on the report endpoint for the entire file.
+        """
+        hollow = (
+            "sale_timestamp,transaction_ref,product_name,quantity,unit_price,total_amount,payment_method\n"
+            "2026-09-01,,Paracetamol 500mg,2,12.50,25.00,cash\n"
+            "2026-09-02,,Ibuprofen 400mg,1,20.00,20.00,cash\n"
+            "2026-09-03,,Amoxicillin 250mg,1,15.00,15.00,insurance\n"
+            "2026-09-04,,Paracetamol 500mg,3,12.50,37.50,insurance\n"
+        )
+        body = _upload_named(client, [("hollow.csv", hollow)], name="all-null")
+        apps = client.get("/api/v1/applications", headers=api_headers()).json()["applications"]
+        proj = _client_report(client, apps[0]["id"], body["analysis_id"])
+
+        profile = proj["Files"]["hollow.csv"]["Column profile"]
+        row = next(r for r in profile["Rows"] if r[0] == "transaction_ref")
+        # 100% null is the finding, and it is what the table shows.
+        assert row[2] == "100.00", row
+        # No statistics exist for a column with no values, and the report says
+        # so with an empty cell rather than inventing numbers.
+        assert row[3] == "0.00", row
+
+    def test_finding_detail_arrives_as_notes_with_severity(self, client):
+        """A failed check and a warning must not read as the same grey line.
+
+        ``findings_detail`` writes ``"<check>=<status> <detail>"``
+        (``quality.py:215``). The status used to be discarded on the way out, so
+        the client could not colour a failure differently from an advisory even
+        though it already knows how to render severity.
+        """
+        # A column that is over half null across the file, which is what
+        # `empty_or_null` fails on (quality.py:45). The 4-row fixtures above sit
+        # far below that threshold, so a file with two nulls out of two rows is
+        # used instead. `_upload_named` rather than `_projection_for`, which
+        # names every file `sales.csv`.
+        hollow = (
+            "sale_timestamp,transaction_ref,product_name,quantity,unit_price,total_amount,payment_method\n"
+            "2026-09-01,,Paracetamol 500mg,2,12.50,25.00,cash\n"
+            "2026-09-02,,Ibuprofen 400mg,1,20.00,20.00,cash\n"
+            "2026-09-03,,Amoxicillin 250mg,1,15.00,15.00,insurance\n"
+            "2026-09-04,,Paracetamol 500mg,3,12.50,37.50,insurance\n"
+        )
+        body = _upload_named(client, [("hollow.csv", hollow)], name="severity")
+        apps = client.get("/api/v1/applications", headers=api_headers()).json()["applications"]
+        entry = _client_report(client, apps[0]["id"], body["analysis_id"])["Files"]["hollow.csv"]
+
+        # The count is the guard that the fixture still behaves as the test
+        # assumes. Without it, an engine change that stopped raising findings
+        # would leave the assertions below passing against an empty list.
+        assert int(entry["Quality"]["Findings"]) > 0, "fixture no longer produces findings"
+
+        notes = entry["Quality"]["Finding detail"]["$notes"]
+        assert len(notes) == int(entry["Quality"]["Findings"])
+        assert all(n["Severity"] in ("critical", "warn", "info") for n in notes)
+        assert all(n["Subject"] and n["Detail"] for n in notes), notes
+        # The subject is the check name and the detail is what the producer said
+        # about it. Splitting the string twice let the status token land in
+        # Detail, so `empty_or_null=fail` reached the reader as a failure
+        # described as the word "fail".
+        assert all("=" not in n["Subject"] for n in notes)
+        assert all("=" not in n["Detail"] for n in notes)
+        assert all(
+            n["Detail"].lower() not in ("fail", "warn", "pass", "error")
+            for n in notes
+        ), [n["Detail"] for n in notes]
+        # A mostly-empty column is a failure, not an advisory, and the client
+        # colours the two differently -- that distinction is the reason this is a
+        # tagged list rather than the flat strings it replaced.
+        empty_or_null = next(n for n in notes if n["Subject"] == "empty_or_null")
+        assert empty_or_null["Severity"] == "critical"
+        # The note says which column, so the reader knows where to look.
+        assert "transaction_ref" in empty_or_null["Detail"], empty_or_null
+        # And says how much of it is empty, as a percentage. `high_null_columns`
+        # held the raw 0-1 fraction under the same `null_pct` name that
+        # `profile.py` fills on a 0-100 scale, so this read "1.0% null" for a
+        # column that is entirely empty.
+        assert "100.0% null" in empty_or_null["Detail"], empty_or_null

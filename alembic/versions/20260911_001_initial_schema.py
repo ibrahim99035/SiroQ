@@ -24,8 +24,11 @@ depends_on = None
 def upgrade() -> None:
     # pgcrypto extension
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-    # postgis extension
-    op.execute("CREATE EXTENSION IF NOT EXISTS postgis")
+    # postgis is deliberately NOT installed. No table in this schema declares a
+    # geometry/geography column and no code imports geoalchemy2, so the extension
+    # only added a deployment dependency. Managed Postgres providers gate which
+    # extensions they expose (and on which major version), so requiring an
+    # extension nothing uses makes provisioning harder for no benefit.
 
     # associations table
     op.create_table(
@@ -217,6 +220,5 @@ def downgrade() -> None:
     op.drop_table("users")
     op.drop_table("pharmacies")
     op.drop_table("associations")
-    op.execute("DROP EXTENSION IF EXISTS postgis")
     op.execute("DROP EXTENSION IF EXISTS pgcrypto")
     op.execute("DROP TYPE IF EXISTS user_role_enum")

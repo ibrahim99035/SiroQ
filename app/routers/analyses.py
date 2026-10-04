@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.analytics_service import forecast as forecast_engine
+from app.analytics_service import queue
 from app.analytics_service.preview import build_series, infer_columns, pick_date_column, pick_value_column, preview
 from app.analytics_service.reporting import build_client_projection, build_report_model
 from app.analytics_service.storage import read_bytes
@@ -69,6 +70,23 @@ def _json_download(payload: Any, stem: str, analysis_id: Any) -> Response:
     )
 
 
+def _require_report(analysis: Analysis) -> None:
+    """Refuse to render a report for an analysis that has not produced one.
+
+    A queued or running analysis has ``report is None``. Building a projection
+    from that would return a plausible-looking but empty 200 — the worst kind of
+    failure for a caller, because it cannot tell "not ready yet" from "the file
+    contained nothing". 409 tells it to poll.
+    """
+    if analysis.report is not None:
+        return
+    if analysis.status in queue.TERMINAL_STATUSES:
+        detail = analysis.error_message or f"Analysis {analysis.status}."
+    else:
+        detail = f"Analysis is {analysis.status}; no report is available yet."
+    raise HTTPException(status_code=409, detail=detail)
+
+
 @router.get("/applications/{application_id}/analyses/{analysis_id}",
             summary="Full saved analysis report")
 def get_analysis(application_id: str, analysis_id: str, db: Session = Depends(get_db)):
@@ -84,7 +102,11 @@ def get_analysis(application_id: str, analysis_id: str, db: Session = Depends(ge
         "analysis_id": analysis.id,
         "status": analysis.status,
         "created_at": analysis.created_at.isoformat() if analysis.created_at else None,
+        "started_at": analysis.started_at.isoformat() if analysis.started_at else None,
         "completed_at": analysis.completed_at.isoformat() if analysis.completed_at else None,
+        # Only meaningful for a failed run, but a caller polling a job needs the
+        # reason it died rather than just a status it already guessed.
+        "error_message": analysis.error_message,
         "summary": analysis.summary,
         "report": analysis.report,
     }
@@ -115,6 +137,7 @@ def get_analysis_report(
     analysis = db.get(Analysis, analysis_id)
     if analysis is None or str(analysis.application_id) != application_id:
         raise HTTPException(status_code=404, detail="Analysis not found")
+    _require_report(analysis)
 
     application = db.get(Application, application_id)
     if format == "json":

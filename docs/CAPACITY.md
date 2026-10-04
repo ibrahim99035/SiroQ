@@ -144,7 +144,7 @@ laptop; ×2 for a modern server core.
   - one `analyses` run ≈ **~10 KB** (`report` JSON average measured 9.7 KB,
     `summary` 0.2 KB; pg bloat ~2–3 × on update-heavy workloads, but analyses
     are append-only).
-  - measured live DB: 4 analyses + 6 files → **16 MB total** including PostGIS.
+  - measured live DB: 4 analyses + 6 files → **16 MB total**, no PostGIS.
   - at 600 runs/hr ≈ 6–20 MB/hr into PG. A 30 GB disk holds ~a year of
     high-rate operation plus report history; backups should prioritize the
     **storage tree** (it is the bulk).
@@ -168,9 +168,8 @@ laptop; ×2 for a modern server core.
    threads; otherwise deploy B/C-class boxes and rely on edge concurrency caps.
 5. Keep the **50 MB / 25-file** caps — they are also the memory guardrails.
    Lower `MAX_FILES_PER_REQUEST` if a single client bursts the whole 1.25 GB.
-6. Don't co-locate heavy PostGIS work on the app box if you run C-class rates;
-   the DB itself is trivial, but shared I/O competes with the storage write
-   path.
+6. Keep database CPU separate from the app box at C-class rates; the schema
+   itself is trivial, but shared I/O competes with the storage write path.
 
 ## 8. How to re-measure on your own hardware
 

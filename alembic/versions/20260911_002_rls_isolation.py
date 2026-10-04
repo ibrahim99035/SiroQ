@@ -64,7 +64,25 @@ def upgrade() -> None:
     # The migration-owning role is allowed to bypass RLS so the SECURITY DEFINER
     # auth helpers can read the exact credential row pre-auth. The running app
     # never connects as `siroq`, so this does not weaken the app's isolation.
-    op.execute("ALTER ROLE siroq BYPASSRLS")
+    #
+    # Guarded for the same reason as the GRANTs below: `siroq` is the role name
+    # used by the local docker Postgres cluster, not a portable name. On a managed
+    # instance migrations run as whatever owner role that service provides, and an
+    # unconditional ALTER ROLE aborts with 'role "siroq" does not exist'.
+    #
+    # Skipping it costs nothing in production: the v1 schema (revision 006) drops
+    # every RLS-protected table and creates none, so nothing is left to bypass.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'siroq') THEN
+                ALTER ROLE siroq BYPASSRLS;
+            END IF;
+        END
+        $$;
+        """
+    )
 
     op.execute(
         """
@@ -92,8 +110,27 @@ def upgrade() -> None:
     )
     op.execute("REVOKE ALL ON FUNCTION auth_find_user(text) FROM PUBLIC")
     op.execute("REVOKE ALL ON FUNCTION auth_find_user_by_id(uuid) FROM PUBLIC")
-    op.execute("GRANT EXECUTE ON FUNCTION auth_find_user(text) TO siroq_app")
-    op.execute("GRANT EXECUTE ON FUNCTION auth_find_user_by_id(uuid) TO siroq_app")
+    # Grant to the least-privilege app role only when it actually exists.
+    #
+    # ``siroq_app`` is provisioned by docker/init-db/01_create_app_role.sql, which
+    # only runs on the local Postgres container. On a managed instance the role is
+    # absent (or owned by a different superuser), and an unconditional GRANT then
+    # aborts the whole migration with 'role "siroq_app" does not exist'.
+    #
+    # This is safe to skip: the helpers exist solely for the tenancy/auth schema
+    # that revision 006 drops. Nothing in the v1 service schema reads them.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'siroq_app') THEN
+                GRANT EXECUTE ON FUNCTION auth_find_user(text) TO siroq_app;
+                GRANT EXECUTE ON FUNCTION auth_find_user_by_id(uuid) TO siroq_app;
+            END IF;
+        END
+        $$;
+        """
+    )
 
 
 def downgrade() -> None:

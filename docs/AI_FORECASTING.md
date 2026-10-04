@@ -126,11 +126,11 @@ exactly correct.** Fixing this is Phase 0 and is a win independent of any AI wor
 
 | Fact | Value | Consequence |
 |---|---|---|
-| Postgres | 15.8 (`postgis/postgis:15-3.4`) | — |
-| `pgvector` | **not available** (only `fuzzystrmatch`, `pg_trgm`, `unaccent`, `postgis`) | No vector DB without an image change. `pg_trgm` is available and sufficient. |
+| Postgres | Neon managed Postgres. No PostGIS — migration `001` deliberately skips it and no column is spatial. | Only `pgcrypto` is required, and migration `001` installs it. |
+| `pgvector` | **not available** on Neon without a plan that includes it | No vector DB. `pg_trgm` is available and sufficient. |
 | `cryptography` | **not installed** | New dependency, required for §5.4. Binary wheels — no build step. |
 | `httpx` | `0.27.2` in `requirements.txt:17` | Available at runtime; no new HTTP client needed. |
-| `siroq_app` grants | `SELECT` on tables, **no** `CREATE` on database | Migration `008` must run as `siroq` via `MIGRATIONS_DATABASE_URL`; the app role needs explicit `GRANT`s. |
+| `siroq_app` grants | `SELECT` on tables, **no** `CREATE` on database | Migrations must run as the branch owner via `MIGRATIONS_DATABASE_URL`; the app role needs explicit `GRANT`s. |
 | Handlers | all sync `def`, no `async` | An LLM call adds network latency to a currently pure-compute path — must stay off the critical path. |
 | Test suite | 46 tests, 6 modules | Any new code must be additive behind a default-off flag. |
 

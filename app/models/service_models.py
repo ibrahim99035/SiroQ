@@ -40,12 +40,18 @@ class StoredFile(Base):
         index=True,
     )
     original_filename: Mapped[str] = mapped_column(Text, nullable=False)
-    stored_path: Mapped[str] = mapped_column(Text, nullable=False)
-    sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Nullable only for a file registered from a handed-off URL whose bytes have
+    # not been fetched yet. See migration 20261003_009 and
+    # app/analytics_service/handoff.py: the worker fills these in.
+    stored_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     file_type: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="stored")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Where the bytes still are, while `status` is 'pending'. Cleared by the
+    # worker once the bytes are in our own storage.
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -68,6 +74,9 @@ class Analysis(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

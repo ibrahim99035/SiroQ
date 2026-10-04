@@ -112,7 +112,7 @@ Archived / deleted:
 
 ## Verification
 
-- alembic upgrade head against dockerized Postgres (port 5433)
+- alembic upgrade head against Neon (direct, non-pooled endpoint)
 - pytest suite (roundtrip, quality-on-messy-file, api-key auth)
 - curl smoke with X-API-Key
 

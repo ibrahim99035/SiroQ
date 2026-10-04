@@ -15,20 +15,24 @@ and live file preview/series endpoints.
 ### Windows / macOS / Linux (Docker)
 
 **Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-installed and running. Ports `8000` and `5433` must be free.
+installed and running, plus a Neon project with the `siroq_app` role created on
+it. Only port `8000` needs to be free — the database is Neon, and nothing local
+is started.
 
 ```bash
 git clone https://github.com/ibrahim99035/SiroQ.git
 cd SiroQ
-docker compose up -d                      # builds the app image, starts PostGIS + API
+cp .env.example .env                  # then fill in the Neon connection strings
+docker compose up -d                  # builds the app image, starts the API
 docker compose exec app alembic upgrade head   # creates the tables (first run only)
 ```
 
-That is the whole setup. `docker compose up -d` starts **both** containers — the
-PostGIS database on `:5433` and the API on `:8000` — and the app waits for the
-database's healthcheck before starting. The `siroq_app` database role and its
-grants are created automatically on first boot by
-[`docker/init-db/01_create_app_role.sql`](docker/init-db/01_create_app_role.sql).
+That is the whole setup. `docker compose up -d` starts **one** container — the API
+on `:8000` — talking to Neon. Run
+[`docker/init-db/01_create_app_role.sql`](docker/init-db/01_create_app_role.sql)
+once against the branch database, as the branch owner, to create the `siroq_app`
+role and its grants. It needs no PostGIS: the only extension the schema uses is
+`pgcrypto`, and migration `001` installs it.
 
 | URL | What |
 |---|---|
@@ -40,20 +44,18 @@ grants are created automatically on first boot by
 
 ```bash
 docker compose logs -f app    # follow the app log
-docker compose down            # stop everything, keep the data
-docker compose down -v         # stop and DELETE the database volume
+docker compose down            # stop the API
 ```
 
-Data lives in the named volume `siroq_siroq_pg_data`, and raw uploads are written
-to `./data/storage`. Both survive `down` and are destroyed by `down -v`.
+Raw uploads in development are written to `./data/storage`. The database is Neon,
+so there is no local data volume to preserve.
 
 ### Without Docker (host Python)
 
-Use this for development with live reload. You still need a Postgres, but it does
-**not** need to be the PostGIS image — the service uses no spatial features.
+Use this for development with live reload. Same Neon database — no local
+Postgres, and none is needed.
 
 ```bash
-docker compose up -d db       # database only, on :5433
 python3.12 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/python -m alembic upgrade head
@@ -61,7 +63,9 @@ python3.12 -m venv .venv
 ```
 
 The database connection is read from `.env` (copy `.env.example` to `.env` and
-edit it). `STORAGE_PATH` is a plain directory and is created on demand.
+edit it). `DATABASE_URL` and `MIGRATIONS_DATABASE_URL` have no defaults, so the
+app names the missing variable rather than failing to connect. `STORAGE_PATH` is a
+plain directory and is created on demand.
 
 ### What to expect on first run
 
@@ -84,15 +88,15 @@ dependencies onto your machine.
 
 ## Test
 
-Tests run against a throwaway database and throwaway storage — never the live
-data:
-
 ```bash
-DATABASE_URL="postgresql+psycopg://siroq_app:siroq_app_dev_password@localhost:5433/siroq_test" \
-MIGRATIONS_DATABASE_URL="postgresql+psycopg://siroq:siroq_dev_password@localhost:5433/siroq_test" \
-STORAGE_PATH="/tmp/siroq_test_storage" \
-.venv/bin/python -m pytest -q
+make test        # or: .venv/bin/python -m pytest -q
 ```
+
+Reads the Neon connection strings from `.env`. The suite derives a throwaway
+`*_test` database from whichever database it is given, so it can never run
+against `neondb` itself, and it pins `STORAGE_DRIVER=local` before importing any
+application code — tests wipe storage between cases, so pointing them at the
+bucket would delete real objects.
 
 ## Build the package
 

@@ -13,12 +13,17 @@ permissions:
   packages: write       # GHCR image push
 
 jobs:
-  # --- run the test suite against a throwaway PostGIS service container ---
+  # --- run the test suite against a throwaway Postgres service container ---
+  #
+  # Plain Postgres, not PostGIS: migration 001 deliberately does not install
+  # PostGIS and no column uses a geometry type, so the extension was only ever
+  # making this image heavier. Keep the major version in step with the Neon
+  # branch the service actually deploys against.
   test:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgis/postgis:15-3.4
+        image: postgres:16
         env:
           POSTGRES_USER: siroq
           POSTGRES_PASSWORD: siroq_dev_password
@@ -44,10 +49,22 @@ jobs:
         run: pip install -r requirements.txt
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+      # Mirrors docker/init-db/01_create_app_role.sql, which now documents Neon
+      # provisioning and names the `neondb` database, so it cannot be replayed
+      # against this container. Only pgcrypto: see migration 001.
       - name: Create least-privilege app role
         run: |
           PGPASSWORD=siroq_dev_password psql -h 127.0.0.1 -U siroq -d siroq \
-            -v ON_ERROR_STOP=1 -f docker/init-db/01_create_app_role.sql
+            -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE EXTENSION IF NOT EXISTS pgcrypto;
+          CREATE ROLE siroq_app LOGIN PASSWORD 'siroq_app_dev_password';
+          GRANT CONNECT ON DATABASE siroq TO siroq_app;
+          GRANT USAGE ON SCHEMA public TO siroq_app;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public
+              GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO siroq_app;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public
+              GRANT USAGE, SELECT ON SEQUENCES TO siroq_app;
+          SQL
           PGPASSWORD=siroq_dev_password psql -h 127.0.0.1 -U siroq -d siroq -c "
             GRANT ALL ON ALL TABLES IN SCHEMA public TO siroq_app;
             GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO siroq_app;

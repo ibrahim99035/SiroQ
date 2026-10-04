@@ -41,9 +41,13 @@ def check_empty_or_null(df: pd.DataFrame, field_scores: dict) -> dict[str, Any]:
     high_null = []
     if df is not None and not df.empty:
         for col in df.columns:
-            pct = df[col].isna().mean()
-            if pct > 0.5:
-                high_null.append({"column": str(col), "null_pct": round(float(pct), 2)})
+            fraction = df[col].isna().mean()
+            # Stored as a percentage, not the raw fraction. `profile.py` writes
+            # `null_pct` on the same 0-100 scale, and two fields of the same name
+            # on different scales is a trap for whoever reads them next: a 62.5%
+            # null column was being reported as "0.62% null".
+            if fraction > 0.5:
+                high_null.append({"column": str(col), "null_pct": round(float(fraction) * 100, 1)})
         if len(df) > 0 and any(isinstance(c, str) and c.startswith("Unnamed:")
                                for c in df.columns):
             high_null.append({"column": "(header-row detected)", "null_pct": 1.0})
@@ -205,12 +209,38 @@ def run_quality_checks(df: pd.DataFrame, field_scores: dict) -> dict[str, Any]:
     }
 
 
+def _describe(check: dict) -> str:
+    """A readable phrase for a check that reports facts but no sentence.
+
+    Two checks name the columns at fault and nothing else, so ``findings_detail``
+    used to emit ``"unmapped_columns=warn "`` -- a finding with nothing after it.
+    And a check with a ``by_column`` count rendered that dict through ``str()``,
+    putting ``{'quantity': 2}`` in the middle of an English sentence. The client
+    can colour a finding it cannot read no better than one it cannot parse.
+    """
+    named = check.get("high_null_columns")
+    if named:
+        return ", ".join(
+            f"{c.get('column')} {c.get('null_pct')}% null" for c in named[:3] if isinstance(c, dict)
+        )
+    cols = check.get("unmapped_columns")
+    if cols:
+        return ", ".join(str(c) for c in cols[:3])
+    by_column = check.get("by_column")
+    if isinstance(by_column, dict) and by_column:
+        return ", ".join(f"{k} × {v}" for k, v in list(by_column.items())[:3])
+    detail = check.get("detail")
+    if detail:
+        return str(detail)
+    count = check.get("count")
+    return str(count) if count else ""
+
+
 def findings_detail(quality: dict[str, Any]) -> list[str]:
     """Human-readable list of the non-passing findings for a file."""
     out = []
     for c in quality.get("checks", []):
         if c.get("status") == "pass":
             continue
-        detail = c.get("detail") or c.get("count") or c.get("by_column") or ""
-        out.append(f"{c['check']}={c['status']} {detail}")
+        out.append(f"{c['check']}={c['status']} {_describe(c)}".rstrip())
     return out

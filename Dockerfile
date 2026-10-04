@@ -13,4 +13,9 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers: Render terminates TLS and forwards the real scheme/host, so
+# uvicorn has to trust those headers or generated URLs come back as http://.
+# --forwarded-allow-ips=* is safe here only because the container is reachable
+# exclusively from Render's private network, never from the internet directly.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--proxy-headers", "--forwarded-allow-ips=*"]

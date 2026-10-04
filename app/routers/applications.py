@@ -2,11 +2,11 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, Response, status as http_status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.analytics_service import ingestion, pipeline, storage
+from app.analytics_service import handoff, ingestion, pipeline, queue, storage
 from app.config import settings
 from app.database import get_db
 from app.models.service_models import Analysis, Application, StoredFile
@@ -18,6 +18,15 @@ router = APIRouter(prefix="/api/v1", tags=["applications"], dependencies=[Depend
 class NewApplication(BaseModel):
     name: str
     metadata: dict = Field(default_factory=dict)
+
+
+class SourceFile(BaseModel):
+    original_filename: str
+    source_url: str
+
+
+class RegisterFilesBody(BaseModel):
+    files: list[SourceFile]
 
 
 def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
@@ -265,17 +274,105 @@ def get_application(application_id: str, db: Session = Depends(get_db)):
     }
 
 
-@router.post("/applications/{application_id}/files", summary="Upload files to an application and analyze")
+@router.post("/applications/{application_id}/files", summary="Upload files to an application")
 def upload_files(
     application_id: str,
     files: list[UploadFile] = File(...),
+    # Register without analysing, so a caller can stage a whole filing and then
+    # queue exactly one job for it. Used by the local-storage development path,
+    # where files cannot be handed over by URL and so must arrive in the body.
+    defer: bool = Query(False),
     db: Session = Depends(get_db),
 ):
     app_obj = _application_or_404(db, application_id)
     uploads = _read_uploads(files)
     _persist_files(db, app_obj.id, uploads)
+    if defer:
+        return {
+            "application_id": app_obj.id,
+            "file_count": len(uploads),
+            "status": queue.STATUS_QUEUED,
+            "note": "Files registered; queue an analysis to run them.",
+        }
     analysis = _run_and_store_analysis(db, app_obj)
     return _analysis_response(analysis)
+
+
+@router.post(
+    "/applications/{application_id}/files/by-url",
+    status_code=201,
+    summary="Register files by URL; the worker fetches the bytes when a job runs",
+)
+def register_files_by_url(
+    application_id: str,
+    body: RegisterFilesBody,
+    db: Session = Depends(get_db),
+):
+    """Register files without uploading them through this service.
+
+    A caller that already holds the bytes in its own object storage passes
+    short-lived presigned GET URLs here. Only the URL is recorded: the transfer
+    itself happens in the worker, because the caller is typically a serverless
+    function with a wall-clock ceiling, and a 50 MB download inside one would
+    time out exactly when the filing is large enough to matter.
+
+    That makes this endpoint fast and idempotent rather than slow and
+    byte-consuming. It also means the URLs are validated here but not yet
+    exercised: a source that has already expired fails later, on the job, with
+    the reason attached.
+
+    Files are only registered. Analysis is a separate explicit
+    ``POST /applications/{id}/analyses``, so a caller can stage a whole filing
+    and then queue exactly one job for it.
+    """
+    app_obj = _application_or_404(db, application_id)
+    if not body.files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(body.files) > settings.MAX_FILES_PER_REQUEST:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Too many files: {len(body.files)} "
+                f"(max {settings.MAX_FILES_PER_REQUEST})"
+            ),
+        )
+
+    registered = []
+    for source in body.files:
+        # Checked now so an obvious mistake (wrong scheme, wrong host) is reported
+        # to the caller immediately instead of surfacing as a failed job later.
+        try:
+            handoff.check_source_url(source.source_url)
+            file_type = ingestion.detect_file_type(source.original_filename)
+        except handoff.HandoffError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        row = StoredFile(
+            application_id=app_obj.id,
+            original_filename=source.original_filename,
+            source_url=source.source_url,
+            file_type=file_type,
+            status=handoff.STATUS_PENDING,
+        )
+        db.add(row)
+        db.flush()  # per-row: see the note in _persist_files about RETURNING
+        registered.append(row)
+    db.commit()
+
+    return {
+        "application_id": app_obj.id,
+        "registered": [
+            {
+                "file_id": row.id,
+                "original_filename": row.original_filename,
+                "file_type": row.file_type,
+                "status": row.status,
+            }
+            for row in registered
+        ],
+    }
 
 
 @router.post("/applications/{application_id}/analyze", summary="Re-run analysis over existing files")
@@ -283,3 +380,52 @@ def reanalyze(application_id: str, db: Session = Depends(get_db)):
     app_obj = _application_or_404(db, application_id)
     analysis = _run_and_store_analysis(db, app_obj)
     return _analysis_response(analysis)
+
+
+def _job_response(analysis: Analysis) -> dict:
+    """Status of a queued job. Deliberately omits summary/report — they are null
+    until a worker finishes, and a client that treats a null report as 'no data'
+    rather than 'not ready' is a bug waiting to happen."""
+    return {
+        "application_id": analysis.application_id,
+        "analysis_id": analysis.id,
+        "status": analysis.status,
+        "created_at": analysis.created_at.isoformat() if analysis.created_at else None,
+    }
+
+
+@router.post(
+    "/applications/{application_id}/analyses",
+    status_code=http_status.HTTP_202_ACCEPTED,
+    summary="Queue an analysis and return immediately",
+)
+def enqueue_analysis(
+    application_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Enqueue an analysis of an application's stored files.
+
+    The async counterpart to ``/analyze``. Use this for anything large: a
+    measured 1M-row run takes ~233 s, which no proxy in a caller's path will hold
+    open for. Returns 202 with a job id; poll
+
+        GET /api/v1/applications/{id}/analyses/{analysis_id}
+
+    until ``status`` is ``completed`` (then fetch ``/report?format=client``) or
+    ``failed``.
+    """
+    app_obj = _application_or_404(db, application_id)
+    has_files = db.query(StoredFile.id).filter(
+        StoredFile.application_id == app_obj.id
+    ).first()
+    if has_files is None:
+        # Fail here rather than let the worker fail later: the caller is still on
+        # the request and gets a 400 instead of an accepted job that dies.
+        raise HTTPException(status_code=400, detail="Application has no files to analyze")
+
+    analysis = queue.enqueue(db, app_obj.id)
+    response.headers["Location"] = (
+        f"/api/v1/applications/{app_obj.id}/analyses/{analysis.id}"
+    )
+    return _job_response(analysis)

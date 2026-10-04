@@ -63,6 +63,9 @@ exactly what the panel used to render.
 - `Value` and `Share` are **pre-formatted strings**. The client parses them for
   geometry via `toNumber()` and prints them verbatim, so a bar's label, its
   printed value and its drawn width cannot disagree.
+- `Rows` cells are **pre-formatted strings** for the same reason, and a cell with
+  no value is `""` — an all-null column has no min/mean/max to print, and its
+  100% null rate is the finding.
 
 ### `$forecast`
 
@@ -112,7 +115,7 @@ so they get a severity marker rather than another row of values.
 The client maps unknown severities to a plain note. A new severity should read as
 information, not as an unstyled block.
 
-Three places emit notes, all as `$notes`:
+Four places emit notes, all as `$notes`:
 
 - `Caveats` — per-file read errors, structural-row exclusions, and ingestion
   notes (header row position, repeated blocks, discarded spacers). Ingestion
@@ -121,13 +124,37 @@ Three places emit notes, all as `$notes`:
 - `Insights → Not computed` — insight groups that were skipped and why.
 - `Evidence gaps` — document-level: files where the evidence does not support
   the metrics, or failed a quality check.
+- `Quality → Finding detail` — the per-file quality checks. `findings_detail`
+  writes `"<check>=<status> <detail>"` (`quality.py:227`), so the status travels
+  with the sentence instead of being discarded, and `fail` reaches the client as
+  `critical` rather than reading like an advisory. The three fields are split
+  once, in `_finding_note`, because splitting the string twice put the status
+  token in `Detail` — a failure whose explanation was the word "fail". This is
+  also why the node is a tagged list: the count above it and the list under it
+  must describe the same set, so the count is derived, not restated.
+
+## The column profile
+
+`Column profile` is a `$chart: table` of `Column`, `Type`, `Nulls` and `Unique`.
+It is a table rather than a map because it is a grid: sent as a
+`{name: {Type, Nulls, Unique}}` map it arrives in the client as one nest per
+column, which reads as thirteen key-value pairs on a dispensing log instead of
+four columns of numbers. A table is also the shape a reviewer copies.
+
+`Column detail` carries the per-column statistics and most-frequent values, and
+is **omitted for any column whose entire content is already in the table**.
+Sending both in full put the same null and unique rates on the page twice under
+two headings, which reads as two disagreeing measurements. The table is built
+from the same map it filters, so a column cannot appear in one and be missing
+from the other.
 
 ## What is *not* a contract
 
-Only the keys a component destructures are pinned. The prose in `Quality`,
-`Column profile` and `Domain` is descriptive: it is pre-formatted for display
-and read as text, so its wording can change with the engine without a bump. The
-tests assert on presence and shape, never on exact sentences.
+Only the keys a component destructures are pinned. The prose in `Quality` and
+`Domain` is descriptive: it is pre-formatted for display and read as text, so its
+wording can change with the engine without a bump. The tests assert on presence
+and shape, never on exact sentences. `Column detail`'s *contents* are likewise
+descriptive, though the key it lives under is pinned.
 
 ## Verification
 

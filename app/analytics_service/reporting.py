@@ -184,27 +184,43 @@ def _profile_rows(profile: Any) -> list[dict]:
             "unique_pct": _fmt(col.get("unique_pct", 0)),
             "stats": "",
         }
+        # The engine only emits min/mean/max when a column actually holds values
+        # (profile.py:55), so an all-null column is kind "number" with none of
+        # them present. Subscripting those keys raised KeyError and took down the
+        # whole report for one empty column; the rate it does carry, 100% null,
+        # is the finding.
         if col.get("kind") == "number":
+            labels = (("min", "min"), ("mean", "mean"), ("max", "max"))
             pieces = [
-                f"min {_fmt(col['min'])}",
-                f"mean {_fmt(col['mean'])}",
-                f"max {_fmt(col['max'])}",
+                f"{label} {_fmt(col[key])}"
+                for key, label in labels
+                if col.get(key) is not None
             ]
             if col.get("sum") is not None:
                 pieces.append(f"sum {_fmt(col['sum'])}")
             row["stats"] = "; ".join(pieces)
         elif col.get("kind") == "date":
             span = col.get("span_days")
-            row["stats"] = (
-                f"{col.get('min')} → {col.get('max')}"
-                + (f" ({span:,} days)" if span is not None else "")
-            )
+            if col.get("min") is None or col.get("max") is None:
+                row["stats"] = ""
+            else:
+                row["stats"] = (
+                    f"{col.get('min')} → {col.get('max')}"
+                    + (f" ({span:,} days)" if span is not None else "")
+                )
         top = col.get("top_values") or []
         row["top_values"] = ", ".join(
             f"{t.get('value')} × {t.get('count')}" for t in top[:3]
         )
         rows.append(row)
     return rows
+
+
+# The per-column measures that get their own grid. Shared by the table builder and
+# the detail filter below, because the two must agree: the detail map carries what
+# the table omits, so a key that is neither shown nor omitted is either duplicated
+# on the page or silently lost.
+PROFILE_TABLE_KEYS = ("Type", "Nulls", "Unique")
 
 
 INSIGHT_FAMILY_TITLES = {
@@ -649,6 +665,32 @@ def _file_labels(models: list[dict]) -> list[str]:
     return labels
 
 
+def _finding_note(raw: Any) -> dict[str, str]:
+    """One ``findings_detail`` string as a drawable note.
+
+    The producer writes ``f"{check}={status} {detail}"`` (``quality.py:215``), so
+    all three fields come out of one string and have to be taken apart once, in
+    one place: splitting it twice let ``Detail`` land on the status token, so
+    ``empty_or_null=fail`` reached the reader as a failure described as "fail".
+
+    A status that does not parse becomes ``info`` rather than ``critical``.
+    Overstating a finding as a failure is the expensive direction to be wrong in.
+    """
+    text = str(raw)
+    subject, sep, rest = text.partition("=")
+    if not sep:
+        return {"Severity": "info", "Subject": text.strip() or "Quality check", "Detail": ""}
+
+    status, _, detail = rest.strip().partition(" ")
+    return {
+        "Severity": {"fail": "critical", "error": "critical", "warn": "warn"}.get(
+            status.strip().lower(), "info"
+        ),
+        "Subject": subject.strip() or "Quality check",
+        "Detail": detail.strip(),
+    }
+
+
 def _file_projection(f: Any, model: dict) -> dict:
     """Per-file branch: everything a reviewer needs, nothing they don't."""
     dq = f.get("data_quality") or {}
@@ -671,7 +713,14 @@ def _file_projection(f: Any, model: dict) -> dict:
         "Findings": _fmt(len(model.get("findings") or [])),
     }
     if model.get("findings"):
-        quality["Finding detail"] = list(model["findings"])
+        # `findings_detail` emits one string per non-passing check, shaped
+        # `"<check>=<status> <detail>"` (quality.py:215). The status was being
+        # thrown away here, so a failed check and a warning arrived at the client
+        # as the same grey line of text. Send a tagged notes list instead: the
+        # client already renders `$notes` with severity markers, and this is the
+        # one place in the branch where the reader most needs to tell a failure
+        # from an advisory.
+        quality["Finding detail"] = {"$notes": [_finding_note(r) for r in model["findings"]]}
 
     domain: dict[str, Any] = {}
     dm = model.get("domain") or {}
@@ -734,7 +783,8 @@ def _file_projection(f: Any, model: dict) -> dict:
         insights["Not computed"] = {"$notes": insight_notes}
 
     columns: dict[str, Any] = {}
-    for row in (model.get("profile_rows") or [])[:40]:
+    profile_rows = (model.get("profile_rows") or [])[:40]
+    for row in profile_rows:
         name = row.get("name")
         if not name:
             continue
@@ -748,6 +798,25 @@ def _file_projection(f: Any, model: dict) -> dict:
         if row.get("top_values"):
             entry["Most frequent"] = row["top_values"]
         columns[str(name)] = entry
+
+    # The per-column profile is a grid, not a tree: one row per column, and the
+    # numbers that matter to a reviewer are the null and unique rates. Sent as a
+    # flat `{name: {Type, Nulls, Unique}}` map it arrived in the client as a nest
+    # thirteen keys deep that had to be clicked through to read. The dashboard
+    # has been charting `null_pct` from this same source all along
+    # (`dashboard/app.js:851-856`); here it becomes a table instead, because the
+    # reader is comparing rates across columns rather than ranking one measure.
+    #
+    # It is built from `columns` rather than from `profile_rows` so the table and
+    # the detail map below cannot disagree about a column's type or rates -- the
+    # two views of one measurement have to be the same measurement.
+    profile_table = _table_chart({
+        "headers": ["Column", *PROFILE_TABLE_KEYS],
+        "rows": [
+            [name, *(entry.get(key) or "" for key in PROFILE_TABLE_KEYS)]
+            for name, entry in columns.items()
+        ],
+    })
 
     branch: dict[str, Any] = {
         "Type": rfmt(model.get("file_type")),
@@ -810,8 +879,20 @@ def _file_projection(f: Any, model: dict) -> dict:
         branch["Business metrics"] = domain
     if insights:
         branch["Insights"] = insights
-    if columns:
-        branch["Column profile"] = columns
+    # The profile table replaces the map, not augments it: shipping the rates in
+    # both places put the same null and unique percentages on the page twice
+    # under two headings, which reads as two disagreeing measurements. So the
+    # detail map keeps only what the table cannot show -- statistics and
+    # most-frequent values -- and a column with neither is simply absent.
+    detail: dict[str, dict[str, Any]] = {}
+    for name, entry in columns.items():
+        extra = {k: v for k, v in entry.items() if k not in PROFILE_TABLE_KEYS}
+        if extra:
+            detail[name] = extra
+    if profile_table is not None:
+        branch["Column profile"] = profile_table
+    if detail:
+        branch["Column detail"] = detail
     # A file that could not be fully read, or that had structural rows stripped,
     # are the two things most likely to make a reviewer over-trust a number.
     # Both go in as notes so they read as caveats rather than as data.

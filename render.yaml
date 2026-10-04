@@ -1,0 +1,131 @@
+# Render blueprint for the SiroQ analysis service.
+#
+#   web service  — stateless FastAPI. Handles uploads, serves reports, enqueues
+#                  long analyses, and runs migrations before each deploy.
+#   worker       — drains the analyses queue. One instance: the queue is
+#                  concurrency-safe (FOR UPDATE SKIP LOCKED) but every extra
+#                  instance is another $25/month for capacity already measured
+#                  as sufficient.
+#
+# Every secret below is sync:false on purpose. A Neon connection string and an
+# object-store key have no place in a tracked file, not even a template one.
+# After the first `render deploy` Render prompts for each of them once, writes
+# them to the service's environment, and keeps them out of git.
+#
+# Two different Neon connection strings, and the difference is not cosmetic:
+#
+#   DATABASE_URL               -> pooler endpoint. The app opens a handful of
+#                                 short connections per request; PgBouncer in
+#                                 transaction mode is what lets Neon serve that
+#                                 pattern, and DATABASE_URL switches the engine
+#                                 to NullPool automatically when it sees
+#                                 "-pooler" in the host.
+#   MIGRATIONS_DATABASE_URL    -> direct endpoint. Alembic needs DDL, which in
+#                                 transaction pooling must not sit inside a
+#                                 transaction that may be reassigned mid-run.
+#
+# Same database, two hosts, different protocols' worth of risk avoided.
+
+# The database is Neon, not a Render-managed Postgres, so there is no
+# `databases:` block here — the schema is reached through the connection strings
+# configured on the services below.
+
+services:
+  - type: web
+    name: siroq-analysis-api
+    runtime: docker
+    plan: standard # 2 GB RAM. Measured floor: a 1M-row run peaks near 717 MB
+                    # RSS, and the 512 MB 'starter' plan is not headroom, it is
+                    # an out-of-memory kill waiting for the first large upload.
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    # Fails the deploy if migrations break, rather than shipping a new build that
+    # 500s on every query because the schema moved underneath it.
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        sync: false
+      - key: MIGRATIONS_DATABASE_URL
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: STORAGE_DRIVER
+        value: s3 # Not optional: Render's filesystem is ephemeral and is wiped
+                  # on every deploy, which would orphan every StoredFile row.
+      - key: STORAGE_KEY_PREFIX
+        value: analysis/
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        value: us-east-2
+      - key: S3_BUCKET
+        value: uploads
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_FORCE_PATH_STYLE
+        value: "true" # Neon Object Storage rejects virtual-hosted-style URLs.
+      # Hosts this service will fetch a caller's file from. The default is this
+      # service's own object store, but the client's objects live on a *different*
+      # Neon branch and therefore a different host — so it has to be named here,
+      # or every handoff is refused. This is an allowlist, not a hint: it is what
+      # stops POST /files/by-url from being an SSRF primitive.
+      - key: SOURCE_URL_ALLOWED_HOSTS
+        value: "br-wispy-voice-b4zmsbo4.storage.c-6.us-east-2.aws.neon.tech"
+
+  - type: worker
+    name: siroq-analysis-worker
+    runtime: docker
+    plan: standard
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker
+    numInstances: 1
+    # The worker has no HTTP surface, so no healthCheckPath. On first deploy it
+    # may boot before the web service's migrations finish; a claim against a
+    # missing table is caught, logged and retried with backoff rather than
+    # crashing the process, so the race is survivable by design.
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        sync: false
+      - key: MIGRATIONS_DATABASE_URL
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: STORAGE_DRIVER
+        value: s3
+      - key: STORAGE_KEY_PREFIX
+        value: analysis/
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        value: us-east-2
+      - key: S3_BUCKET
+        value: uploads
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_FORCE_PATH_STYLE
+        value: "true"
+      - key: WORKER_POLL_INTERVAL_SECONDS
+        value: "2"
+      # One hour. Above the worst measured run (~233 s) so a live job is never
+      # declared abandoned while it is still working, while a crashed deploy is
+      # recovered long before anyone notices the job is stuck.
+      - key: WORKER_STALE_AFTER_SECONDS
+        value: "3600"
+      # Only the web service fetches caller-supplied URLs; mirrored here so the
+      # two services cannot drift apart on configuration.
+      - key: SOURCE_URL_ALLOWED_HOSTS
+        value: "br-wispy-voice-b4zmsbo4.storage.c-6.us-east-2.aws.neon.tech"
