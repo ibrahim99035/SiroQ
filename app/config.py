@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     # process (deploy, crash, OOM) and is put back on the queue. Comfortably
     # above the worst measured run so a live job is never stolen.
     WORKER_STALE_AFTER_SECONDS: int = Field(default=3600, gt=0)
+    # Run the queue drain inside the web process as well as in the worker.
+    #
+    # Render's free tier does not offer background workers at all, so on a free
+    # deployment nothing drains the queue: jobs enqueue, return 202, and sit
+    # "queued" forever. Draining in-process makes that deployment work and costs
+    # nothing while idle, because the process is asleep whenever there is no
+    # traffic. Set this false where a real worker service is already running and
+    # the web process has no business polling — queue.claim_next makes two
+    # drainers safe, but one is enough.
+    WEB_DRAIN_QUEUE: bool = Field(default=True)
 
     # --- Raw-file storage driver -------------------------------------------
     # "local" — a directory on this machine (development, CI, tests).

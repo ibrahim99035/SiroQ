@@ -5,6 +5,8 @@ back on request to other services.
 import hashlib
 import json
 import logging
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Response, status
@@ -12,6 +14,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
+from app import worker
 from app.config import settings
 from app.database import SessionLocal
 from app.routers import analyses, applications
@@ -23,6 +26,44 @@ logging.basicConfig(
 
 DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
 
+# How long to wait for an in-flight analysis to finish on shutdown before letting
+# the thread die with the process. Anything longer just delays the deploy, and
+# queue.claim_next's stale-job reaper puts an interrupted job back on the queue
+# anyway.
+DRAIN_SHUTDOWN_GRACE_SECONDS = 5
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Run the queue drain in this process, so the web service can serve enqueues
+    without a separate worker.
+
+    Render's free tier has no background worker, which left a free deployment
+    accepting jobs and then never running them. Draining here closes that gap, and
+    it is free: the loop sleeps between polls and the platform suspends the whole
+    process whenever there is no traffic, so an idle service still costs nothing.
+
+    Set ``WEB_DRAIN_QUEUE=false`` when a real worker service is running.
+    """
+    stop = threading.Event()
+    thread: threading.Thread | None = None
+    if settings.WEB_DRAIN_QUEUE:
+        thread = threading.Thread(
+            target=worker.run_drain_loop,
+            args=(stop,),
+            name="siroq-queue-drain",
+            daemon=True,
+        )
+        thread.start()
+        logging.getLogger(__name__).info("in-process queue drain started")
+    try:
+        yield
+    finally:
+        if thread is not None:
+            stop.set()
+            thread.join(timeout=DRAIN_SHUTDOWN_GRACE_SECONDS)
+
+
 app = FastAPI(
     title="SiroQ Analysis Service",
     description=(
@@ -31,6 +72,7 @@ app = FastAPI(
         "persist raw files and results, and return them on later requests."
     ),
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.include_router(applications.router)

@@ -9,12 +9,16 @@ queue is one Postgres table, there is one worker, and the alternative would add 
 second datastore whose only job is to move rows between two processes.
 
     python -m app.worker
+
+:func:`run_drain_loop` is shared: the web service runs it on a thread while it is
+alive (see ``WEB_DRAIN_QUEUE`` in :mod:`app.config`), because Render's free tier
+has no worker service and would otherwise never drain the queue at all.
 """
 import logging
 import os
 import signal
 import sys
-import time
+import threading
 
 from app.analytics_service import queue
 from app.config import settings
@@ -24,13 +28,12 @@ logger = logging.getLogger("siroq.worker")
 
 # Set by the SIGTERM handler so the loop finishes the job it is holding instead
 # of dropping it mid-write and leaving it in "running" until it looks abandoned.
-_stopping = False
+_stop = threading.Event()
 
 
 def _install_signal_handlers() -> None:
     def _request_stop(signum, _frame):
-        global _stopping
-        _stopping = True
+        _stop.set()
         logger.info("received %s; finishing current job then exiting", signal.Signals(signum).name)
 
     signal.signal(signal.SIGTERM, _request_stop)
@@ -43,6 +46,48 @@ def _recover(session) -> None:
         queue.requeue_abandoned(session, settings.WORKER_STALE_AFTER_SECONDS)
     except Exception:  # noqa: BLE001 - never refuse to boot over a recovery hiccup
         logger.exception("startup recovery failed; continuing")
+
+
+def run_drain_loop(stop: threading.Event) -> None:
+    """Drain the analyses queue until ``stop`` is set, then return.
+
+    Runs on whichever thread the caller chooses: the worker's own thread from
+    :func:`main`, or the web service's lifespan thread. Claiming is atomic per job
+    (``FOR UPDATE SKIP LOCKED``), so two drainers never double-run one analysis —
+    they simply take different rows.
+    """
+    # The loop owns one session for its lifetime. Each unit of work commits, so
+    # nothing is left open between iterations — unlike a session per request, this
+    # avoids reconnecting (and re-authenticating to Neon) on every poll.
+    with SessionLocal() as session:
+        _recover(session)
+
+        while not stop.is_set():
+            try:
+                analysis_id = queue.claim_next(session)
+            except Exception:  # noqa: BLE001 - a blip must not end the worker
+                logger.exception("claim failed; backing off")
+                stop.wait(min(settings.WORKER_POLL_INTERVAL_SECONDS * 5, 30))
+                continue
+
+            if analysis_id is None:
+                if stop.is_set():
+                    break
+                stop.wait(settings.WORKER_POLL_INTERVAL_SECONDS)
+                continue
+
+            logger.info("claimed analysis %s", analysis_id)
+            try:
+                queue.run_claimed(session, analysis_id)
+            except Exception:  # noqa: BLE001 - run_claimed is terminal, but be sure
+                logger.exception("analysis %s raised out of the worker", analysis_id)
+                session.rollback()
+                try:
+                    queue.fail(session, analysis_id, "Worker crashed while running this job")
+                except Exception:  # noqa: BLE001
+                    logger.exception("could not even record the failure for %s", analysis_id)
+
+    logger.info("drain loop stopped")
 
 
 def main() -> int:
@@ -58,39 +103,7 @@ def main() -> int:
         settings.WORKER_STALE_AFTER_SECONDS,
         settings.STORAGE_DRIVER,
     )
-
-    # The loop owns one session for its lifetime. Each unit of work commits, so
-    # nothing is left open between iterations — unlike a session per request, this
-    # avoids reconnecting (and re-authenticating to Neon) on every poll.
-    with SessionLocal() as session:
-        _recover(session)
-
-        while not _stopping:
-            try:
-                analysis_id = queue.claim_next(session)
-            except Exception:  # noqa: BLE001 - a blip must not end the worker
-                logger.exception("claim failed; backing off")
-                time.sleep(min(settings.WORKER_POLL_INTERVAL_SECONDS * 5, 30))
-                continue
-
-            if analysis_id is None:
-                if _stopping:
-                    break
-                time.sleep(settings.WORKER_POLL_INTERVAL_SECONDS)
-                continue
-
-            logger.info("claimed analysis %s", analysis_id)
-            try:
-                queue.run_claimed(session, analysis_id)
-            except Exception:  # noqa: BLE001 - run_claimed is terminal, but be sure
-                logger.exception("analysis %s raised out of the worker", analysis_id)
-                session.rollback()
-                try:
-                    queue.fail(session, analysis_id, "Worker crashed while running this job")
-                except Exception:  # noqa: BLE001
-                    logger.exception("could not even record the failure for %s", analysis_id)
-
-    logger.info("worker stopped")
+    run_drain_loop(_stop)
     return 0
 
 

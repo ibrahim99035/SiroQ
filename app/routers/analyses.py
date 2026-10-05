@@ -6,6 +6,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
@@ -194,6 +195,27 @@ def get_analysis_report(
     return HTMLResponse(content=body)
 
 
+def content_disposition(filename: str) -> str:
+    """Build a download header that survives a non-ASCII filename.
+
+    Filings here are frequently Arabic, and a header carrying raw UTF-8 is not
+    reliably decoded by every client: some read the bytes as latin-1 and produce a
+    mangled or outright invalid name. Two forms are therefore always sent.
+
+    The quoted `filename=` is ASCII-only, with characters that are illegal in a
+    quoted-string removed, so old clients get *something* rather than a parse
+    error. The real name rides along in `filename*=`, which is RFC 5987's
+    percent-encoded form and what every current browser actually prefers.
+    Percent-encoding happens after the charset prefix is applied to the whole
+    value, and `safe=""` is deliberate: it escapes `/` too, because a filename is
+    one path segment and must not be able to introduce another.
+    """
+    ascii_name = filename.encode("ascii", "replace").decode("ascii")
+    ascii_name = re.sub(r'[^\x20-\x7e"\\;]', "_", ascii_name).replace('"', "").replace("\\", "")
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"
+
+
 @router.get("/files/{file_id}", summary="Download a raw stored file")
 def download_file(file_id: str, db: Session = Depends(get_db)):
     if not _parse_uuid(file_id):
@@ -202,12 +224,11 @@ def download_file(file_id: str, db: Session = Depends(get_db)):
     if stored is None:
         raise HTTPException(status_code=404, detail="File not found")
     content = read_bytes(stored.stored_path)
-    quoted = stored.original_filename.replace('"', "")
     return Response(
         content=content,
         media_type="application/octet-stream",
         headers={
-            "Content-Disposition": f'attachment; filename="{quoted}"',
+            "Content-Disposition": content_disposition(stored.original_filename),
             "X-SHA256": stored.sha256,
         },
     )

@@ -6,9 +6,12 @@ megabytes through every hop. The point of these tests is the two things that
 makes necessary: the URL fetch is guarded, and the bytes move in the worker
 rather than in the caller's request.
 """
+from urllib.parse import unquote
+
 import pytest
 
 from app.analytics_service import handoff
+from app.routers.analyses import content_disposition
 from app.config import settings
 from tests.conftest import api_headers
 
@@ -453,3 +456,47 @@ def test_one_unreachable_file_does_not_strand_the_reachable_ones(
         )
         assert all(row.source_url is None for row in rows)
         assert all(row.stored_path is not None for row in rows)
+
+
+def test_download_header_survives_an_arabic_filename() -> None:
+    """Filings here are often Arabic, so the header has to be lossless.
+
+    A raw UTF-8 name in a quoted `filename=` is decoded as latin-1 by some
+    clients, which yields a mangled or invalid name. The ASCII fallback keeps an
+    old client working and the real name rides in `filename*`.
+    """
+    disposition = content_disposition('تقرير "المبيعات" ٢٠٢٦.xlsx')
+
+    ascii_part, _, extended_part = disposition.partition("; filename*=")
+    assert ascii_part == 'attachment; filename="????? ???????? ????.xlsx"'
+    assert ascii_part.isascii()
+    # The extension is ASCII, so even the fallback keeps the useful part.
+    assert ascii_part.endswith('.xlsx"')
+
+    assert extended_part.startswith("UTF-8''")
+    # Decoding the percent-encoded form has to give the name back exactly,
+    # including the quote that a naive header injection would have eaten.
+    assert unquote(extended_part[len("UTF-8''"):]) == 'تقرير "المبيعات" ٢٠٢٦.xlsx'
+
+
+def test_download_header_cannot_be_split_into_extra_parameters() -> None:
+    """A filename must not be able to append parameters of its own."""
+    disposition = content_disposition('evil; filename="x"; drop.csv')
+
+    # Quotes are stripped rather than escaped, so the quoted string cannot be
+    # closed early by the name itself and nothing can follow it.
+    ascii_part, _, extended_part = disposition.partition("; filename*=")
+    assert ascii_part == 'attachment; filename="evil; filename=x; drop.csv"'
+    assert '"' not in ascii_part[ascii_part.index('"') + 1 : -1]
+
+    # One extended form, so the name is read once and cannot be double-declared.
+    assert disposition.count("filename*=") == 1
+    assert extended_part.startswith("UTF-8''")
+    assert unquote(extended_part[len("UTF-8''"):]) == 'evil; filename="x"; drop.csv'
+
+
+def test_download_header_is_ascii_only() -> None:
+    """The whole header must be latin-1-safe, since the name is the only variable part."""
+    disposition = content_disposition("تقرير.xlsx")
+
+    assert disposition.isascii()
