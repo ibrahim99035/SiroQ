@@ -323,6 +323,7 @@
     const s = analysis.summary || {};
     renderSummary(s, r);
     renderFiles(r.files || []);
+    try { if (r.big_revelations || (analysis.report && analysis.report.big_revelations)) { const br = r.big_revelations || analysis.report.big_revelations; renderBigRevelations(br, $("summaryBox").parentNode || $("summaryBox").parentElement || document.body); } } catch (e) {}
     // actions target the selected analysis
   }
 
@@ -349,6 +350,50 @@
     return '<div class="kpi"><div class="kpi-name">' + esc(name) + '</div><div class="kpi-value ' + (cls || "") + '">' + esc(String(value)) + "</div></div>";
   }
 
+
+  function renderBigRevelations(br, container) {
+    if (!br || typeof br !== "object") return;
+    const el = document.createElement("div");
+    el.className = "card";
+    let html = "<h3>Big revelations</h3><table class='kv'><tbody>";
+    function fmt(n) {
+      if (n === null || n === undefined) return "N/A";
+      if (typeof n === "number") return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return String(n);
+    }
+    html += "<tr><th>Total sales</th><td>" + fmt(br.total_sales) + "</td></tr>";
+    html += "<tr><th>Revenue</th><td>" + fmt(br.revenue) + "</td></tr>";
+    html += "<tr><th>Net profit</th><td>" + fmt(br.net_profit) + "</td></tr>";
+    html += "<tr><th>Average basket size</th><td>" + fmt(br.average_basket_size) + "</td></tr>";
+    if (br.sales_mix && br.sales_mix.length) {
+      html += "<tr><th>Sales mix (top)</th><td><ul style='margin:0;padding-left:18px'>";
+      br.sales_mix.slice(0,10).forEach(function(sm){ html += "<li>" + esc(sm.method||sm.label||"") + " — " + fmt(sm.value||sm.amount) + "</li>"; });
+      html += "</ul></td></tr>";
+    } else {
+      html += "<tr><th>Sales mix</th><td>N/A</td></tr>";
+    }
+    if (br.total_sales_by_category && br.total_sales_by_category.length) {
+      html += "<tr><th>Total sales / category (top)</th><td><ul style='margin:0;padding-left:18px'>";
+      br.total_sales_by_category.slice(0,10).forEach(function(c){ html += "<li>" + esc(c.label||"") + " — " + fmt(c.value) + "</li>"; });
+      html += "</ul></td></tr>";
+    } else {
+      html += "<tr><th>Total sales / category</th><td>N/A</td></tr>";
+    }
+    const bp = br.total_sales_by_person || {};
+    if (bp.available && bp.items && bp.items.length) {
+      html += "<tr><th>Best employee</th><td>" + esc(bp.best_employee||"") + " — " + fmt(bp.best_employee_sales) + "</td></tr>";
+      html += "<tr><th>Total sales / person (top)</th><td><ul style='margin:0;padding-left:18px'>";
+      bp.items.slice(0,10).forEach(function(p){ html += "<li>" + esc(p.person||"") + " — " + fmt(p.total_sales) + "</li>"; });
+      html += "</ul></td></tr>";
+    } else {
+      html += "<tr><th>Best employee</th><td>N/A (data not found)</td></tr>";
+      html += "<tr><th>Total sales / person</th><td>N/A (data not found)</td></tr>";
+    }
+    html += "</tbody></table>";
+    el.innerHTML = html;
+    container.appendChild(el);
+  }
+
   function renderFiles(files) {
     const box = $("filesBox");
     box.innerHTML = "";
@@ -359,6 +404,7 @@
       const body = document.createElement("div");
       body.className = "file-body";
       body.appendChild(fileDetail(f));
+      try { if (f.big_revelations) renderBigRevelations(f.big_revelations, body); } catch (e) {}
       card.appendChild(body);
       box.appendChild(card);
     });

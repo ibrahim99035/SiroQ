@@ -46,6 +46,10 @@ CANONICAL_FIELD_SYNONYMS = {
                        "طريقة الدفع", "payment_method", "payment type"],
     "prescriber": ["prescriber", "doctor", "physician", "prescribing",
                    "الطبيب", "prescriber_name"],
+    "employee": ["employee", "employee name", "employee_name", "salesperson",
+                 "sales person", "sales_person", "sales rep", "sales representative",
+                 "seller", "sold by", "served by", "staff", "cashier", "attendant",
+                 "الموظف", "اسم الموظف", "البائع"],
     "batch_id": ["batch", "lot", "lot number", "الدفعة", "رقم الدفعة",
                  "batch_id", "batch_no", "lot_no"],
     "product_name": ["product", "drug name", "medicine name", "drug",
@@ -68,6 +72,11 @@ CANONICAL_FIELD_SYNONYMS = {
     "waste_quantity": ["waste qty", "waste_quantity", "waste amount",
                        "writeoff qty", "writeoff_quantity", "write off",
                        "damaged qty", "damage qty", "expired qty", "waste"],
+    "employee": ["employee", "employee name", "employee_name", "salesperson",
+                 "sales person", "sales_rep", "sales rep", "rep", "staff",
+                 "cashier", "clerk", "agent", "owner", "seller",
+                 "salesperson_name", "rep_name", "person", "responsible",
+                 "served_by", "serviced_by"],
 }
 
 CONF_CONFIRMED = 90

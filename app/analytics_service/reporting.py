@@ -67,6 +67,179 @@ def _list_bars(seq: list, max_len: int = 12) -> list[dict]:
         elif isinstance(it, dict) and _num(it.get("count")) and "value" in it:
             counted[str(it["value"])] = float(it["count"])
     return bars([{"label": k, "value": v} for k, v in counted.items()], max_len)
+def _get_sales_domain(f: Any) -> Any:
+    da = f.get("domain_analytics") or {}
+    if isinstance(da, dict) and da.get("sales"):
+        return da["sales"]
+    # sometimes top-level
+    return None
+
+
+def _compute_big_revelations(f: Any, model: dict) -> dict:
+    """Compute big revelations for a single file."""
+    out: dict[str, Any] = {
+        "total_sales": None,
+        "revenue": None,
+        "net_profit": None,
+        "sales_mix": [],
+        "average_basket_size": None,
+        "total_sales_by_category": [],
+        "total_sales_by_person": {
+            "items": [],
+            "best_employee": None,
+            "best_employee_sales": None,
+            "available": False,
+        },
+    }
+    sales = _get_sales_domain(f) or {}
+    if isinstance(sales, dict):
+        if _num(sales.get("revenue")):
+            out["revenue"] = float(sales["revenue"])
+            out["total_sales"] = float(sales["revenue"])
+        # mix
+        mix = sales.get("payment_mix") or []
+        if isinstance(mix, list):
+            pairs = _pairs(mix, "method", "amount")[:10]
+            out["sales_mix"] = pairs
+            # if no revenue from sales, try sum
+            if out["revenue"] is None:
+                s = sum(p["value"] for p in pairs)
+                if s:
+                    out["revenue"] = s
+                    out["total_sales"] = s
+        if _num(sales.get("avg_basket")):
+            out["average_basket_size"] = float(sales["avg_basket"])
+
+    # net profit from insights
+    insights = f.get("insights") or {}
+    # insights may be dict with items/groups
+    items = []
+    if isinstance(insights, dict):
+        items = insights.get("items") or insights.get("profitability") or []
+        # also check grouped
+        if not items:
+            for g in (insights.get("groups") or []):
+                if isinstance(g, dict):
+                    items.extend(g.get("items") or [])
+    for it in items:
+        if isinstance(it, dict) and str(it.get("label", "")).lower() == "net profit":
+            val = it.get("value")
+            if _num(val):
+                out["net_profit"] = float(val)
+            elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                try:
+                    out["net_profit"] = float(val)
+                except Exception:
+                    pass
+            break
+    if out["net_profit"] is None and isinstance(insights, dict):
+        # try to find by name in any item
+        for g in (insights.get("groups") or []):
+            if isinstance(g, dict):
+                for it in (g.get("items") or []):
+                    if isinstance(it, dict) and "net profit" in str(it.get("label", "")).lower():
+                        v = it.get("value")
+                        if _num(v) or isinstance(v, (int, float)):
+                            try:
+                                out["net_profit"] = float(v)
+                            except Exception:
+                                pass
+                            break
+                else:
+                    continue
+                break
+
+    # categories
+    out["total_sales_by_category"] = [c for c in (model.get("category_bars") or [])][:10]
+
+    # person/employee
+    emp_col = None
+    cmap = f.get("classification") or {}
+    if isinstance(cmap, dict):
+        # canonical field map
+        mapped = cmap.get("employee") or cmap.get("salesperson")
+        if mapped and isinstance(mapped, dict):
+            emp_col = mapped.get("column") or mapped.get("source") or mapped.get("name")
+        # maybe flat
+    if not emp_col:
+        # try to infer from columns/canonical mapping
+        cols = f.get("columns") or []
+        # simple scan
+        emp_names = {"employee", "salesperson", "sales rep", "rep", "staff", "cashier",
+                     "clerk", "agent", "owner", "seller", "served_by", "person"}
+        for c in cols:
+            if str(c).strip().lower().replace(" ", "_") in {"employee", "employee_name",
+                                                            "salesperson", "sales_rep", "rep",
+                                                            "staff", "cashier", "served_by"}:
+                emp_col = c
+                break
+    total_col = None
+    # find total/revenue column from canonical
+    if isinstance(cmap, dict):
+        for k in ("total_amount", "revenue", "net_revenue", "total"):
+            if cmap.get(k):
+                m = cmap[k]
+                if isinstance(m, dict):
+                    total_col = total_col or m.get("column") or m.get("source")
+                elif isinstance(m, str):
+                    total_col = total_col or m
+    if not total_col:
+        tmap = {"total_amount", "revenue", "total_sales", "grand_total", "amount"}
+        for c in (f.get("columns") or []):
+            cl = str(c).strip().lower().replace(" ", "_")
+            if cl in tmap:
+                total_col = c
+                break
+
+    if emp_col:
+        try:
+            rows = []
+            # get rows from model if multi-sheet flattened? model has rows summary; better from f data
+            # but f may have sheets/raw; try to aggregate from profile? easier: scan sheets
+            sheets = f.get("sheets") or []
+            if f.get("multi_sheet") and sheets:
+                for s in sheets:
+                    if isinstance(s, dict) and s.get("data") is not None:
+                        rows.extend(list(s["data"]))
+                    elif isinstance(s, dict) and s.get("rows"):
+                        rows.extend(list(s["rows"]))
+            else:
+                if f.get("data") is not None:
+                    rows = list(f["data"])
+                elif f.get("rows"):
+                    rows = list(f["rows"])
+            # build groups
+            groups: dict[str, float] = {}
+            for r in rows:
+                if isinstance(r, dict):
+                    emp = str(r.get(emp_col) or r.get(str(emp_col)) or "").strip()
+                    if not emp or emp.lower() == "nan":
+                        continue
+                    amt = 0.0
+                    for tcand in [total_col, "total_amount", "revenue", "amount", "total"]:
+                        if tcand and tcand in r:
+                            try:
+                                v = float(r[tcand])
+                                if v == v:  # not NaN
+                                    amt = v
+                                    break
+                            except Exception:
+                                pass
+                    if amt:
+                        groups[emp] = groups.get(emp, 0.0) + amt
+            items_p = [{"person": k, "total_sales": round(float(v), 2)}
+                       for k, v in sorted(groups.items(), key=lambda x: (-x[1], x[0]))][:10]
+            out["total_sales_by_person"] = {
+                "items": items_p,
+                "best_employee": items_p[0]["person"] if items_p else None,
+                "best_employee_sales": round(float(items_p[0]["total_sales"]), 2) if items_p else None,
+                "available": bool(items_p),
+            }
+        except Exception:
+            pass
+
+    return out
+
 
 
 def _interpret_domain(da: Any) -> dict:
@@ -415,9 +588,15 @@ def build_file_model(f: Any) -> dict:
                           "top_category": f.get("top_category")}]
 
     cats = f.get("categories") or {}
-    model["category_bars"] = bars(
-        [{"label": k, "value": v} for k, v in cats.items()], max_len=10
-    )
+    items_cats = []
+    for k, v in cats.items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            items_cats.append({"label": k, "value": v})
+        elif isinstance(v, list):
+            items_cats.append({"label": k, "value": len(v)})
+        else:
+            items_cats.append({"label": k, "value": 0})
+    model["category_bars"] = bars(items_cats, max_len=10)
 
     dq = f.get("data_quality") or {}
     model["quality_score"] = dq.get("score")
@@ -434,6 +613,10 @@ def build_file_model(f: Any) -> dict:
     if da is not None:
         model["domain"] = _interpret_domain(da)
     model["insights"] = build_insight_model(f.get("insights"))
+    try:
+        model["big_revelations"] = _compute_big_revelations(f, model)
+    except Exception:
+        model["big_revelations"] = None
     return model
 
 
@@ -721,6 +904,12 @@ def _file_projection(f: Any, model: dict) -> dict:
         # one place in the branch where the reader most needs to tell a failure
         # from an advisory.
         quality["Finding detail"] = {"$notes": [_finding_note(r) for r in model["findings"]]}
+
+    try:
+        if model.get("big_revelations"):
+            quality["Big revelations"] = model["big_revelations"]
+    except Exception:
+        pass
 
     domain: dict[str, Any] = {}
     dm = model.get("domain") or {}
@@ -1017,6 +1206,14 @@ def build_client_projection(
             if label
         }
 
+    try:
+        agg_br = _aggregate_big_revelations(models)
+        if agg_br:
+            projection["Big revelations"] = agg_br
+            projection["big_revelations"] = agg_br
+    except Exception:
+        pass
+
     notes: list[dict[str, Any]] = []
     for (f, m), label in zip(pairs, labels):
         skipped = ((m.get("domain") or {}).get("skipped")) or []
@@ -1050,6 +1247,75 @@ def build_client_projection(
     return projection
 
 
+def _aggregate_big_revelations(files_models: list[dict]) -> dict:
+    out: dict[str, Any] = {
+        "total_sales": 0.0,
+        "revenue": 0.0,
+        "net_profit": 0.0,
+        "sales_mix": [],
+        "average_basket_size": None,
+        "total_sales_by_category": [],
+        "total_sales_by_person": {
+            "items": [],
+            "best_employee": None,
+            "best_employee_sales": None,
+            "available": False,
+        },
+    }
+    total_rev = 0.0
+    total_net = 0.0
+    mix_agg: dict[str, float] = {}
+    cat_agg: dict[str, float] = {}
+    person_agg: dict[str, float] = {}
+    total_tx = 0.0  # not directly stored; skip weighted basket
+    any_rev = False
+    for m in files_models:
+        br = (m.get("big_revelations") or {}) if isinstance(m, dict) else {}
+        if isinstance(br, dict):
+            if _num(br.get("revenue")):
+                total_rev += float(br["revenue"])
+                any_rev = True
+            elif _num(br.get("total_sales")):
+                total_rev += float(br["total_sales"])
+                any_rev = True
+            if _num(br.get("net_profit")):
+                total_net += float(br["net_profit"])
+            for sm in br.get("sales_mix") or []:
+                if isinstance(sm, dict) and (sm.get("method") or sm.get("label")):
+                    key = str(sm.get("method") or sm.get("label"))
+                    val = float(sm.get("value") or sm.get("amount") or 0.0)
+                    mix_agg[key] = mix_agg.get(key, 0.0) + val
+            for c in br.get("total_sales_by_category") or []:
+                if isinstance(c, dict) and (c.get("label") or c.get("category")):
+                    key = str(c.get("label") or c.get("category"))
+                    val = float(c.get("value") or c.get("amount") or 0.0)
+                    cat_agg[key] = cat_agg.get(key, 0.0) + val
+            bp = br.get("total_sales_by_person") or {}
+            if isinstance(bp, dict):
+                for it in bp.get("items") or []:
+                    if isinstance(it, dict) and it.get("person"):
+                        key = str(it["person"])
+                        val = float(it.get("total_sales") or it.get("value") or 0.0)
+                        person_agg[key] = person_agg.get(key, 0.0) + val
+    if any_rev:
+        out["total_sales"] = round(total_rev, 2)
+        out["revenue"] = round(total_rev, 2)
+    if total_net:
+        out["net_profit"] = round(total_net, 2)
+    out["sales_mix"] = [{"method": k, "value": round(float(v), 2), "amount": round(float(v), 2)}
+                        for k, v in sorted(mix_agg.items(), key=lambda x: (-x[1], x[0]))][:10]
+    out["total_sales_by_category"] = [{"label": k, "value": round(float(v), 2)}
+                                      for k, v in sorted(cat_agg.items(), key=lambda x: (-x[1], x[0]))][:10]
+    pp = [{"person": k, "total_sales": round(float(v), 2)}
+          for k, v in sorted(person_agg.items(), key=lambda x: (-x[1], x[0]))][:10]
+    out["total_sales_by_person"] = {
+        "items": pp,
+        "best_employee": pp[0]["person"] if pp else None,
+        "best_employee_sales": round(float(pp[0]["total_sales"]), 2) if pp else None,
+        "available": bool(pp),
+    }
+    return out
+
 def build_report_model(report: Any, summary: Any = None) -> dict:
     report = report or {}
     model: dict[str, Any] = {
@@ -1067,4 +1333,8 @@ def build_report_model(report: Any, summary: Any = None) -> dict:
             "findings_count": summary.get("findings_count"),
             "categories_detected": summary.get("categories_detected") or {},
         }
+    try:
+        model["big_revelations"] = _aggregate_big_revelations(model.get("files") or [])
+    except Exception:
+        model["big_revelations"] = None
     return model

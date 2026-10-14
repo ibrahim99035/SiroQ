@@ -189,6 +189,55 @@
       {% endfor %}
   </div>
   {% endif %}
+  {% if model.big_revelations %}
+  <h2 class="section">Big revelations</h2>
+  <div class="card">
+    <h3>Across all files</h3>
+    <table>
+      <tbody>
+        <tr><th>Total sales</th><td>{{ "{:,.2f}".format(model.big_revelations.total_sales) if model.big_revelations.total_sales is not none else "N/A" }}</td></tr>
+        <tr><th>Revenue</th><td>{{ "{:,.2f}".format(model.big_revelations.revenue) if model.big_revelations.revenue is not none else "N/A" }}</td></tr>
+        <tr><th>Net profit</th><td>{{ "{:,.2f}".format(model.big_revelations.net_profit) if model.big_revelations.net_profit is not none else "N/A" }}</td></tr>
+        <tr><th>Average basket size</th><td>{{ "{:,.2f}".format(model.big_revelations.average_basket_size) if model.big_revelations.average_basket_size is not none else "N/A" }}</td></tr>
+        {% if model.big_revelations.sales_mix %}
+        <tr><th>Sales mix (top)</th><td>
+          <ul style="margin:0;padding-left:18px">
+            {% for sm in model.big_revelations.sales_mix %}
+            <li>{{ sm.method or sm.label }} — {{ "{:,.2f}".format(sm.value or sm.amount) }}</li>
+            {% endfor %}
+          </ul>
+        </td></tr>
+        {% else %}
+        <tr><th>Sales mix</th><td>N/A</td></tr>
+        {% endif %}
+        {% if model.big_revelations.total_sales_by_category %}
+        <tr><th>Total sales / category (top)</th><td>
+          <ul style="margin:0;padding-left:18px">
+            {% for c in model.big_revelations.total_sales_by_category %}
+            <li>{{ c.label }} — {{ "{:,.2f}".format(c.value) }}</li>
+            {% endfor %}
+          </ul>
+        </td></tr>
+        {% else %}
+        <tr><th>Total sales / category</th><td>N/A</td></tr>
+        {% endif %}
+        {% if model.big_revelations.total_sales_by_person and model.big_revelations.total_sales_by_person.available %}
+        <tr><th>Best employee</th><td>{{ model.big_revelations.total_sales_by_person.best_employee }} — {{ "{:,.2f}".format(model.big_revelations.total_sales_by_person.best_employee_sales) }}</td></tr>
+        <tr><th>Total sales / person (top)</th><td>
+          <ul style="margin:0;padding-left:18px">
+            {% for p in model.big_revelations.total_sales_by_person.items %}
+            <li>{{ p.person }} — {{ "{:,.2f}".format(p.total_sales) }}</li>
+            {% endfor %}
+          </ul>
+        </td></tr>
+        {% else %}
+        <tr><th>Best employee</th><td>N/A (data not found)</td></tr>
+        <tr><th>Total sales / person</th><td>N/A (data not found)</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
   {% endif %}
 
   {% for f in model.files %}
@@ -208,6 +257,55 @@
     {% if f.errors %}
     <p style="color:var(--bad)">{% for e in f.errors %}{{ e }} {% endfor %}</p>
     {% endif %}
+  </div>
+  {% if f.big_revelations %}
+  <div class="card">
+    <h3>Big revelations (this file)</h3>
+    <table>
+      <tbody>
+        <tr><th>Total sales</th><td>{{ "{:,.2f}".format(f.big_revelations.total_sales) if f.big_revelations.total_sales is not none else "N/A" }}</td></tr>
+        <tr><th>Revenue</th><td>{{ "{:,.2f}".format(f.big_revelations.revenue) if f.big_revelations.revenue is not none else "N/A" }}</td></tr>
+        <tr><th>Net profit</th><td>{{ "{:,.2f}".format(f.big_revelations.net_profit) if f.big_revelations.net_profit is not none else "N/A" }}</td></tr>
+        <tr><th>Average basket size</th><td>{{ "{:,.2f}".format(f.big_revelations.average_basket_size) if f.big_revelations.average_basket_size is not none else "N/A" }}</td></tr>
+        {% if f.big_revelations.sales_mix %}
+        <tr><th>Sales mix (top)</th><td>
+          <ul style="margin:0;padding-left:18px">
+            {% for sm in f.big_revelations.sales_mix %}
+            <li>{{ sm.method or sm.label }} — {{ "{:,.2f}".format(sm.value or sm.amount) }}</li>
+            {% endfor %}
+          </ul>
+        </td></tr>
+        {% else %}
+        <tr><th>Sales mix</th><td>N/A</td></tr>
+        {% endif %}
+        {% if f.big_revelations.total_sales_by_category %}
+        <tr><th>Total sales / category (top)</th><td>
+          <ul style="margin:0;padding-left:18px">
+            {% for c in f.big_revelations.total_sales_by_category %}
+            <li>{{ c.label }} — {{ "{:,.2f}".format(c.value) }}</li>
+            {% endfor %}
+          </ul>
+        </td></tr>
+        {% else %}
+        <tr><th>Total sales / category</th><td>N/A</td></tr>
+        {% endif %}
+        {% if f.big_revelations.total_sales_by_person and f.big_revelations.total_sales_by_person.available %}
+        <tr><th>Best employee</th><td>{{ f.big_revelations.total_sales_by_person.best_employee }} — {{ "{:,.2f}".format(f.big_revelations.total_sales_by_person.best_employee_sales) }}</td></tr>
+        <tr><th>Total sales / person (top)</th><td>
+          <ul style="margin:0;padding-left:18px">
+            {% for p in f.big_revelations.total_sales_by_person.items %}
+            <li>{{ p.person }} — {{ "{:,.2f}".format(p.total_sales) }}</li>
+            {% endfor %}
+          </ul>
+        </td></tr>
+        {% else %}
+        <tr><th>Best employee</th><td>N/A (data not found)</td></tr>
+        <tr><th>Total sales / person</th><td>N/A (data not found)</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
 
     {% if f.rows and f.rows | length > 1 %}
     <table>
